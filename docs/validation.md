@@ -66,7 +66,7 @@ Both workloads run with 1, 2, 4, and 8 workers.
 | --- | --- |
 | Debug | 107/107 tests passed; one-worker diamond output verified |
 | Release | 107/107 tests passed; all four example outputs verified |
-| AddressSanitizer + UndefinedBehaviorSanitizer | Phase 4 validation pending |
+| AddressSanitizer + UndefinedBehaviorSanitizer | 107/107 tests passed; no sanitizer findings reported |
 | ThreadSanitizer | 107/107 tests passed with the WSL workaround below; no race findings reported |
 
 The work-stealing example reports a checksum of `357389824`, `1025` submitted
@@ -93,6 +93,14 @@ After the final fan-out storage-growth improvement, the full Release suite was
 repeated and all 23 dependency cases, including graph stress, were rerun under
 TSan. Both checks passed. The earlier Debug and complete TSan suite results
 preceded this storage-growth change.
+
+The final ASan/UBSan run also covered the complete 107-test suite after that
+change. It used `-DCMAKE_CXX_FLAGS_DEBUG=-O1` to omit debug symbols and apply
+modest optimization while retaining sanitizer instrumentation. The focused-test
+objects were removed after linking that executable to make room for the stress
+link. Only generated workspace build artifacts were deleted; completed build
+directories were removed between configurations as required by the full host
+disk.
 
 The sanitizer flags apply to library, example, and test translation units. The
 system GoogleTest package is prebuilt and is not rebuilt with instrumentation.

@@ -67,8 +67,13 @@ Scheduler::Scheduler(Config config)
             worker->start();
         }
     } catch (...) {
-        // A failed thread allocation must wake and join workers already created.
+        // Stop every running thread before member unwinding destroys any queue
+        // in the shared steal registry. Joining one Worker at a time during
+        // vector destruction would leave its peers scanning destroyed entries.
         close_submission();
+        for (auto& worker : workers_) {
+            worker->join();
+        }
         throw;
     }
 }

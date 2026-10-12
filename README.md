@@ -4,7 +4,7 @@ ThreadForge is a C++20 multicore task scheduling runtime. The project is built i
 tested increments, with worker-local queues, a global injection queue, and work
 stealing across CPU workers.
 
-## Current milestone: Phase 4
+## Current milestone: Phase 5
 
 - Configurable, fixed worker pool owned through `std::jthread`.
 - Mutex-protected FIFO queue and condition-variable waiting.
@@ -13,7 +13,9 @@ stealing across CPU workers.
 - High / Normal / Low priorities with work-conserving 8:4:1 weighted service.
 - Dependency handles, remaining-prerequisite counters, and ready scheduling.
 - Fan-in and fan-out graphs that release tasks without blocking workers.
-- Thread-safe steal, queue-source, and worker-wait counters.
+- Task lifecycle, failure, priority, queue-source, and worker distribution metrics.
+- Optional execution, queue, dependency, and idle-wait timing with readable reports.
+- Google Benchmark comparisons against sequential work and a centralized FIFO pool.
 - Callable submission with arguments, move-only captures, and `std::future` results.
 - Task exceptions delivered through futures without terminating workers.
 - Graceful shutdown that drains accepted tasks and joins every worker.
@@ -25,6 +27,8 @@ with API contracts in [docs/scheduler.md](docs/scheduler.md).
 Priority selection and fairness limits are detailed in [docs/priorities.md](docs/priorities.md).
 Dependency contracts and the one-worker diamond example are in
 [docs/dependencies.md](docs/dependencies.md).
+Metric definitions and timing limits are in [docs/metrics.md](docs/metrics.md),
+with benchmark commands and methodology in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Build and test
 
@@ -42,6 +46,7 @@ ctest --test-dir build --output-on-failure
 ./build/threadforge_work_stealing
 ./build/threadforge_priorities
 ./build/threadforge_dependency_graph
+./build/threadforge_metrics_report
 ```
 
 GoogleTest is resolved using `find_package(GTest REQUIRED)`; builds do not download
@@ -72,8 +77,33 @@ ctest --test-dir build-tsan --output-on-failure
 ASan and TSan cannot be combined; configuration rejects that combination.
 Sanitizer options propagate to consumers and fail on detected violations.
 See [docs/validation.md](docs/validation.md) for measured validation and environment
-limitations. Benchmarks are planned for Phase 5; their methodology is outlined in
-[docs/benchmarks.md](docs/benchmarks.md).
+limitations.
+
+## Benchmarks
+
+Benchmark builds are optional and require the system Google Benchmark package.
+Build an optimized executable independently of tests:
+
+```sh
+sudo apt-get install libbenchmark-dev
+cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DTHREADFORGE_BUILD_BENCHMARKS=ON \
+  -DTHREADFORGE_BUILD_TESTS=OFF -DTHREADFORGE_BUILD_EXAMPLES=OFF
+cmake --build build-bench --target threadforge_benchmarks
+./build-bench/benchmarks/threadforge_benchmarks \
+  --benchmark_min_time=0.2 --benchmark_repetitions=5 \
+  --benchmark_out=benchmark-results.json --benchmark_out_format=json
+```
+
+The suite checks identical CPU workloads through sequential execution, a
+centralized FIFO pool, and ThreadForge at 1, 2, 4, and 8 workers. It covers uniform
+external submissions and uneven worker-local fan-out. Pool construction and final
+shutdown are excluded; submission and result waiting are timed. See
+[docs/benchmarks.md](docs/benchmarks.md) for exact boundaries, validation, filters,
+and reporting limits. Test execution times are not benchmark measurements.
+For a benchmark-only build with environment, JSON, and summary artifacts, run
+`bash scripts/run_benchmarks.sh`; its output directory defaults to the ignored
+`benchmark-results/` folder.
 
 ## Usage
 
@@ -123,11 +153,22 @@ scheduler.shutdown();
 auto metrics = scheduler.metrics();
 // Every accepted task is classified once after the workers have joined.
 auto claimed = metrics.local_tasks + metrics.global_tasks + metrics.tasks_stolen;
+auto completed = metrics.tasks_completed;
+auto failed = metrics.tasks_failed;
 ```
 
-Snapshots include per-worker counts, failed victim-priority-lane probes, and wait episodes.
-Live snapshots are approximate across counters; call `shutdown()` before relying
-on final totals. Wait counts measure wait entries, not idle time.
+Snapshots include completed and failed tasks, per-priority and per-worker counts,
+pending/ready/running/dependency-waiting work, failed victim-priority-lane probes,
+and wait episodes. Live snapshots are approximate across counters; call
+`shutdown()` before relying on final totals. Future readiness can precede the
+last completion-counter update.
+
+Set `Config::enable_timing = true` before constructing a scheduler to collect
+execution, queue, dependency, and idle-wait durations. Timing is disabled by
+default. `threadforge::write_metrics(output, snapshot)` prints a readable report;
+the [metrics example](examples/metrics_report.cpp) enables timing and prints its
+batch wall time and throughput. See [docs/metrics.md](docs/metrics.md) for field
+definitions and the distinction between elapsed intervals and CPU utilization.
 
 The default worker count uses `std::thread::hardware_concurrency()`, falling back
 to one worker. An explicitly configured zero worker count is rejected.
@@ -158,9 +199,9 @@ for user tasks to return; it cannot interrupt them.
 2. **Worker-local queues, work stealing, and steal counters** — complete.
 3. **Priorities and weighted fairness** — complete.
 4. **Dependency graph scheduling** — complete; explicit task-state APIs remain future work.
-5. Metrics and reproducible performance comparisons.
+5. **Metrics and reproducible performance comparisons** — complete.
 6. Stress testing, sanitizers, CI, documentation, and examples.
 7. Optional advanced scheduling and optimization.
 
-Queues remain mutex-protected. Performance results will be published only after
-measurement; no performance claim is made yet.
+Queues remain mutex-protected. Performance claims require measured results for
+matching workloads, with the environment and timing boundaries recorded.

@@ -1,9 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
-project(ThreadForge VERSION 0.4.0 LANGUAGES CXX)
+project(ThreadForge VERSION 0.5.0 LANGUAGES CXX)
 
 option(THREADFORGE_BUILD_TESTS "Build the GoogleTest test suite" ON)
 option(THREADFORGE_BUILD_EXAMPLES "Build examples" ON)
 option(THREADFORGE_BUILD_STRESS_TESTS "Build the heavier GoogleTest stress suite" ON)
+option(THREADFORGE_BUILD_BENCHMARKS "Build the optional Google Benchmark suite" OFF)
 option(THREADFORGE_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(THREADFORGE_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(THREADFORGE_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
@@ -53,7 +54,7 @@ else()
 endif()
 
 if(THREADFORGE_BUILD_EXAMPLES)
-    foreach(example IN ITEMS basic work_stealing priorities dependency_graph)
+    foreach(example IN ITEMS basic work_stealing priorities dependency_graph metrics_report)
         add_executable(threadforge_${example} examples/${example}.cpp)
         target_link_libraries(threadforge_${example} PRIVATE threadforge::threadforge)
     endforeach()
@@ -65,7 +66,7 @@ if(THREADFORGE_BUILD_TESTS)
     include(GoogleTest)
     add_executable(threadforge_tests tests/scheduler_test.cpp tests/queue_test.cpp
         tests/stealing_test.cpp tests/priority_test.cpp tests/priority_api_test.cpp
-        tests/dependency_test.cpp)
+        tests/dependency_test.cpp tests/metrics_test.cpp tests/centralized_pool_test.cpp)
     target_link_libraries(threadforge_tests PRIVATE threadforge::threadforge GTest::gtest_main)
     gtest_discover_tests(threadforge_tests DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 30)
@@ -76,4 +77,8 @@ if(THREADFORGE_BUILD_TESTS)
         gtest_discover_tests(threadforge_stress_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
             PROPERTIES TIMEOUT 120 LABELS stress)
     endif()
+endif()
+
+if(THREADFORGE_BUILD_BENCHMARKS)
+    add_subdirectory(benchmarks)
 endif()

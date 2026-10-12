@@ -1,4 +1,4 @@
-# Phase 4 validation
+# ThreadForge validation
 
 Validation is performed on Ubuntu 24.04 under WSL2, using GCC 13.3.0, CMake 3.28.3,
 Ninja, and GoogleTest 1.14.0. The core library uses portable C++20; other compilers
@@ -60,7 +60,7 @@ Graph stress tests validate every result and execution count in 100-layer,
 registration also races shutdown, checking both accepted and rejected tasks.
 Both workloads run with 1, 2, 4, and 8 workers.
 
-## Validated builds
+## Phase 4 validated builds
 
 | Configuration | Result |
 | --- | --- |
@@ -107,6 +107,23 @@ system GoogleTest package is prebuilt and is not rebuilt with instrumentation.
 Passing these workloads is evidence for the tested paths, not proof of the absence
 of all concurrency defects. No benchmark result is inferred from test execution
 time.
+
+## Phase 5 validation
+
+Phase 5 adds eight metrics cases and nine centralized-baseline pool cases, for
+124 tests: 91 focused cases and 33 stress cases. Metrics tests use gates to verify
+running, ready, dependency-blocked, and completed transitions, priority totals,
+callable failures, and optional timings. Four concurrent producers submit 8,000
+tasks while snapshots check the locked gauge partition, then verify settled
+totals and every result. Baseline tests cover FIFO selection, forwarding,
+exceptions, fan-out, concurrent producers, admission closure, and thread joins.
+
+The full Release build (`-O3 -DNDEBUG`) passed 124/124 tests. The metrics report
+example returned checksum `358438400`, 1,025 started/completed tasks, zero failures,
+and zero final pending/ready/running/dependency gauges. All 54 Google Benchmark
+cases completed with three repetitions and validated their checksums. The short
+sample is described in [benchmarks.md](benchmarks.md); it is separate from test
+execution times.
 
 ## WSL ThreadSanitizer startup
 

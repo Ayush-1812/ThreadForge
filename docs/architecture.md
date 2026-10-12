@@ -1,4 +1,4 @@
-# Architecture: Phase 4
+# Architecture: Phase 5
 
 ThreadForge combines a global injection queue with one mutex-protected queue per
 worker. Every queue has separate High, Normal, and Low lanes. External submissions
@@ -60,9 +60,11 @@ returned future's `get()`.
 | Worker joins | Scheduler shutdown mutex serializes external callers |
 | Results and task exceptions | Standard future shared state |
 | Worker identity | Thread-local worker pointer, accessed only by the current thread |
-| Counters | Per-worker relaxed atomics; submitted count uses a relaxed atomic |
+| Worker counts and duration accumulators | Per-worker relaxed atomics, written by their owning worker |
+| Pending/ready/running/dependency gauges, submission priorities, dependency durations | Scheduler state mutex |
+| Submitted count | Relaxed atomic, sampled with admission fields under the state mutex |
 | Victim and priority cursors | Accessed only by their owning worker |
-| Worker count | Immutable configuration after construction |
+| Worker count and optional timing configuration | Immutable configuration after construction |
 
 ## Scheduling and waiting
 
@@ -113,6 +115,21 @@ The shared state lock is a correctness tradeoff: local queues distribute queue
 access, but admission, dependency registration, readiness promotion, and completion
 bookkeeping remain serialized.
 
+Each invocation starts by moving one task from the ready gauge to the running
+gauge under the state mutex. The executing worker counts its start, then invokes
+the typed packaged task. A catch around the callable records an escaping
+exception before rethrowing it to the packaged task's result state. Completion
+updates the worker's completed and priority counts, removes the running task,
+and promotes eligible descendants. Throwing executions are also completed;
+failure counts are a subset rather than a separate terminal category.
+
+Optional monotonic-clock timing records admission, readiness, and execution start
+on the node. Queue wait measures readiness to execution start, while dependency
+wait measures admission to readiness for an initially blocked task. Execution
+timing ends before acquiring the dependency-completion lock. Worker wait timing
+covers the condition-variable wait interval. With `Config::enable_timing` false,
+these clock reads are skipped and counters remain available.
+
 ## Shutdown protocol
 
 1. Reject shutdown from a worker of the same scheduler before taking the join lock.
@@ -153,16 +170,24 @@ shared state lock and queue mutexes can become contention points. Continuous
 injection work can postpone intrusive-ready tasks of the same class. No lock-free
 algorithm or performance advantage is claimed without measurement.
 
-`metrics()` aggregates submitted tasks, local/global claims, successful steals,
-failed victim-priority-lane probes, and wait episodes. The per-worker counters use
-relaxed atomics and do not establish synchronization. A live snapshot can mix
-different instants; after shutdown the counters are stable and every accepted task has exactly one
-local/global/stolen classification. Successful steals are charged to the thief.
-Submitted totals include accepted blocked children; global claims include both
+`metrics()` aggregates task starts, completions, callable failures, submission and
+completion priorities, queue-source claims, victim-priority-lane probes, and wait
+episodes. It also samples pending, ready, running, and dependency-waiting gauges
+together under the state lock, preserving their partition of unfinished work.
+Per-worker counters use relaxed atomic reads and do not establish synchronization.
+A live snapshot can combine those gauges with worker counts from different
+instants; after shutdown every accepted task has a settled completion and exactly
+one local/global/stolen classification. Successful steals are charged to the
+thief. Submitted totals include accepted blocked children; global claims include
 injection and intrusive ready-list tasks.
+
 An empty victim can produce three failed probes in a full scan, one per priority
 lane; no self-probe is counted. Wait episodes count entries into a
-condition-variable wait, not elapsed idle time.
+condition-variable wait rather than elapsed idle time. Optional durations sum
+execution, ready-queue, dependency, and idle-wait intervals; aggregate execution
+and queue maxima select the largest worker maximum. Concurrent execution totals
+are not program wall time or CPU utilization. Full definitions are in
+[Runtime metrics](metrics.md).
 
 Tasks must terminate for graceful shutdown to finish. The runtime does not forcibly
 interrupt user code. Blocking all workers on futures for work submitted to their
@@ -176,9 +201,15 @@ or shutdown of multiple schedulers remain the application's responsibility.
 
 ## Repository evolution
 
-Phase 4 adds `task_handle.hpp`, completion-based dependency registration, active
-task ownership, intrusive ready lists, and dedicated `dependency_test.cpp`
-coverage. Priority lanes, weighted service, work stealing, and source metrics
-remain in place. The global queue retains its blocking API for direct consumers
-and tests; runtime workers use priority-specific nonblocking probes and the
-scheduler-wide waiting protocol.
+Phase 5 extends lifecycle counters, priority totals, pending-work gauges, optional
+durations, and an ostream report. Dedicated `metrics_test.cpp` coverage verifies
+gated transitions, exception accounting, timing configuration, worker aggregates,
+and concurrent snapshots. `examples/metrics_report.cpp` prints a settled report.
+The optional Google Benchmark target compares sequential work, a centralized
+FIFO pool, and ThreadForge's uniform and uneven fan-out workloads; its methodology
+is in [Scheduler benchmarks](benchmarks.md).
+
+Dependency handles, active task ownership, intrusive ready lists, priority lanes,
+weighted service, and work stealing remain in place. The global queue retains its
+blocking API for direct consumers and tests; runtime workers use priority-specific
+nonblocking probes and the scheduler-wide waiting protocol.

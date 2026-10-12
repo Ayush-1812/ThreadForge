@@ -1,19 +1,164 @@
-# Benchmark plan
+# Scheduler benchmarks: Phase 5
 
-No scheduler performance benchmarks have been measured yet. Test durations are not
-performance benchmark results, and no throughput or speedup is claimed.
+The optional Google Benchmark executable compares identical validated CPU work
+through sequential execution, a centralized FIFO worker pool, and ThreadForge.
+Benchmark infrastructure is separate from runtime tests. No speedup or throughput
+claim follows from test durations or from adding these benchmarks.
 
-Phase 5 will compare sequential execution, the centralized queue baseline, and
-ThreadForge's work-stealing runtime using Google Benchmark where practical.
+## Build and run
 
-Planned workloads include tiny scheduling-heavy tasks, medium and long CPU-bound
-tasks, skewed task distribution, and mixed task durations. Worker counts will
-include 1, 2, 4, and 8 where the machine supports them. Every implementation must
-produce the same validated outputs, and task creation/submission will be included
-or excluded consistently and explicitly.
+Google Benchmark is resolved from the system with `find_package(benchmark
+REQUIRED)` when `THREADFORGE_BUILD_BENCHMARKS=ON`. The option defaults to `OFF`;
+normal library, example, and test builds do not require this package. Builds do
+not download benchmark dependencies.
 
-Reports will record compiler, flags, CPU, core count, operating system, workload
-parameters, warmup, repetitions, and timing boundaries. Wall time, throughput,
-speedup relative to sequential work, steals, and worker distribution will be
-reported only after collecting them. Shared-host load, WSL scheduling, allocation
-overhead, and background processes will be identified as measurement limitations.
+On Ubuntu, build an optimized executable:
+
+```sh
+sudo apt-get install libbenchmark-dev
+cmake -S . -B build-bench -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DTHREADFORGE_BUILD_BENCHMARKS=ON \
+  -DTHREADFORGE_BUILD_TESTS=OFF -DTHREADFORGE_BUILD_EXAMPLES=OFF
+cmake --build build-bench --target threadforge_benchmarks
+./build-bench/benchmarks/threadforge_benchmarks \
+  --benchmark_min_time=0.2 --benchmark_repetitions=5 \
+  --benchmark_report_aggregates_only=true \
+  --benchmark_out=benchmark-results.json --benchmark_out_format=json
+python3 scripts/summarize_benchmarks.py benchmark-results.json > benchmark-summary.md
+```
+
+List registered cases with `--benchmark_list_tests=true`. Filter the cases when
+examining a specific workload:
+
+```sh
+./build-bench/benchmarks/threadforge_benchmarks \
+  --benchmark_filter='^BM_ThreadForgeUniform' --benchmark_min_time=0.2
+./build-bench/benchmarks/threadforge_benchmarks \
+  --benchmark_filter='UnevenFanout' --benchmark_min_time=0.2
+```
+
+Use the same repetition count and minimum time for each implementation being
+compared. For sustained measurements, increase the minimum time and retain the
+JSON output alongside the machine and compiler details.
+
+[`scripts/run_benchmarks.sh`](../scripts/run_benchmarks.sh) automates an optimized
+benchmark-only build and records the environment, raw JSON, and summary:
+
+```sh
+bash scripts/run_benchmarks.sh
+bash scripts/run_benchmarks.sh benchmark-results --benchmark_repetitions=3
+```
+
+The runner defaults to a 0.1-second warmup, 0.2-second minimum measurement time,
+and five repetitions. An optional first argument selects the output directory;
+remaining arguments are passed to Google Benchmark. The default
+`benchmark-results/` directory is ignored by Git. Set
+`THREADFORGE_BENCHMARK_BUILD_DIR` to choose the build directory and
+`THREADFORGE_BUILD_JOBS` to change the default one build job. The output contains
+`environment.txt`, `results.json`, and `summary.md`; Python 3 is required for the
+summary step.
+
+The summary script prints batch wall times in microseconds, preferring the
+median when repetition aggregates are present, and speedups against the matching
+sequential case. It rejects reports containing benchmark errors. A filtered
+report without a matching sequential case can show its batch time without a
+speedup.
+
+## Implementations and workloads
+
+| Cases | Execution model |
+| --- | --- |
+| `BM_SequentialUniform`, `BM_SequentialUnevenFanout` | The calling thread executes the CPU kernel directly |
+| `BM_CentralizedUniform`, `BM_CentralizedUnevenFanout` | A fixed worker pool consumes one mutex-protected FIFO queue |
+| `BM_ThreadForgeUniform`, `BM_ThreadForgeUnevenFanout` | ThreadForge uses worker-local queues, global injection, and stealing |
+
+Parallel cases run with 1, 2, 4, and 8 workers. Every case processes 1,024 child
+tasks with kernel sizes of 1, 256, or 16,384 rounds. Sequential cases have task and
+round parameters; parallel cases also have a worker-count parameter. The tiny
+case emphasizes scheduling overhead, while larger cases increase the work per
+task. These names describe configured work, not measured task durations.
+
+The executable registers 54 cases. Named arguments appear in the result keys,
+for example
+`BM_ThreadForgeUniform/workers:4/tasks:1024/rounds:256/manual_time`.
+
+Uniform cases submit all independent tasks externally. Uneven fan-out cases
+submit one parent that creates all child tasks: they enter that worker's local
+queue in ThreadForge and the shared FIFO queue in the centralized baseline. The
+parent returns child futures to the external caller, so it never blocks a worker
+waiting for its children. Every sixteenth child performs sixteen times the base
+kernel rounds; the other children perform the base amount. The sequential
+equivalent computes the same uneven child workload directly.
+
+The centralized baseline is a deliberately small FIFO pool, rather than a copy
+of ThreadForge's priority and dependency features. Benchmark tasks use default
+Normal priority and do not declare dependencies. The comparison measures each
+implementation's actual scheduling and submission costs for these workloads; it
+does not isolate a single algorithm while holding every internal cost constant.
+
+Each iteration validates the exact unsigned integer checksum against the same
+sequential kernel. Validation protects against discarded work or mismatched
+payloads. A failed result marks the benchmark as an error rather than producing a
+performance result.
+
+## Timing boundaries
+
+Cases use manual elapsed wall-time measurements from a monotonic clock. Pool
+construction occurs before iteration timing, and final shutdown and destruction
+occur after timing. The reference checksum is also computed outside the interval.
+
+Timed work includes task containers and reserves, callable submission, the CPU
+kernel, waiting for results, and destruction of the iteration's result containers.
+The completion boundary is availability of every result through `future.get()`.
+ThreadForge's final completion bookkeeping may briefly trail future readiness and
+overlap the next iteration; the final drain is excluded. This measures time until
+application results are available, rather than time to construct and destroy a
+fresh pool for every batch.
+
+The same benchmark process reuses a pool across its iterations. ThreadForge's
+optional duration collection remains disabled for these comparisons, so its
+reported runtime counters do not require task-level clock reads. Stable
+queue-source and worker-distribution counts are collected after final shutdown,
+outside iteration timing. They describe that run's scheduling and are not fixed
+expected steal counts.
+
+Google Benchmark's `items_per_second` counts the 1,024 child tasks per batch.
+ThreadForge also reports `submitted_per_batch`, `completed_per_batch`,
+`local_per_batch`, `global_per_batch`, `stolen_per_batch`,
+`failed_steals_per_batch`, `waits_per_batch`, and each
+`workerN_completed_share`. Fan-out submission/completion totals include the
+control parent, so they are 1,025 rather than the 1,024 throughput items. Worker
+shares range from zero to one and describe completed task counts across the run.
+The exact checksum is reported as `checksum_hi` and `checksum_lo`, its two 32-bit
+halves, so floating-point counter storage does not round the full 64-bit value.
+
+`failed_steals_per_batch` and `waits_per_batch` divide the pool's lifetime counters
+by the iteration count. They also include untimed startup and final-shutdown
+scans and waits, so they are not exclusive event counts inside the measured
+intervals.
+
+## Reporting and interpretation
+
+Record compiler version, optimization flags, CPU model, available logical and
+physical cores, operating system, benchmark library version, workload parameters,
+warmup, minimum time, repetition count, and timing boundaries. Retain per-run results and
+Google Benchmark's repetition aggregates. Report measured wall time and task
+throughput, with units and the corresponding worker and workload parameters.
+
+Calculate speedup only between matching workload and task-count configurations:
+`sequential wall time / parallel wall time`. A one-worker ThreadForge result
+includes submission and synchronization costs that direct sequential execution
+does not incur. Oversubscribing available cores, shared-host activity, WSL
+scheduling, CPU frequency changes, memory allocation, and background processes
+can affect the result. A short correctness smoke run establishes that cases run
+and validate their outputs; it does not establish a reliable speedup.
+
+Counter reports complement wall time: uneven per-worker task counts can reflect
+different task costs, and more steals do not alone establish better performance.
+Dependency latency, priority fairness, and task-level timing collection are not
+benchmark workloads in this first suite. The fixed 1,024-task batch and synthetic
+integer kernel also limit conclusions about larger graphs or application-specific
+memory access patterns.
+
+Measured results should be added only after actual runs, with their environment
+and uncertainty. No performance measurements are fabricated in this document.

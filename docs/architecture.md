@@ -1,4 +1,4 @@
-# Architecture: Phase 5
+# Architecture: Phase 6
 
 ThreadForge combines a global injection queue with one mutex-protected queue per
 worker. Every queue has separate High, Normal, and Low lanes. External submissions
@@ -200,6 +200,14 @@ from one of its own tasks is unsupported. Cycles involving tasks, external locks
 or shutdown of multiple schedulers remain the application's responsibility.
 
 ## Repository evolution
+
+Phase 6 adds shutdown and allocation-failure regressions, optional Python report
+validation tests, private warnings-as-errors for project targets, sanitizer
+support checks, and a Linux CI matrix. These checks exercise the existing runtime
+contracts rather than adding cancellation or changing scheduling policy. The
+configured workflow and local commands are described in
+[Testing and hardening](hardening.md); actual local results and environment limits
+remain in [Validation](validation.md).
 
 Phase 5 extends lifecycle counters, priority totals, pending-work gauges, optional
 durations, and an ostream report. Dedicated `metrics_test.cpp` coverage verifies

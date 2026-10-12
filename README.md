@@ -4,7 +4,7 @@ ThreadForge is a C++20 multicore task scheduling runtime. The project is built i
 tested increments, with worker-local queues, a global injection queue, and work
 stealing across CPU workers.
 
-## Current milestone: Phase 5
+## Current milestone: Phase 6
 
 - Configurable, fixed worker pool owned through `std::jthread`.
 - Mutex-protected FIFO queue and condition-variable waiting.
@@ -21,6 +21,8 @@ stealing across CPU workers.
 - Graceful shutdown that drains accepted tasks and joins every worker.
 - Deterministic priority/dependency tests and runnable scheduling examples.
 - Shutdown race regressions and 100,000-task stress workloads.
+- Allocation-failure regressions and validated benchmark-report normalization.
+- Linux CI matrix with GCC/Clang, warnings-as-errors, and sanitizer lanes.
 
 The runtime design is described in [docs/architecture.md](docs/architecture.md),
 with API contracts in [docs/scheduler.md](docs/scheduler.md).
@@ -29,6 +31,8 @@ Dependency contracts and the one-worker diamond example are in
 [docs/dependencies.md](docs/dependencies.md).
 Metric definitions and timing limits are in [docs/metrics.md](docs/metrics.md),
 with benchmark commands and methodology in [docs/benchmarks.md](docs/benchmarks.md).
+Testing commands, CI scope, and remaining limits are in
+[docs/hardening.md](docs/hardening.md).
 
 ## Build and test
 
@@ -39,7 +43,8 @@ On Ubuntu:
 
 ```sh
 sudo apt-get install build-essential cmake ninja-build libgtest-dev
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DTHREADFORGE_WARNINGS_AS_ERRORS=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/threadforge_basic
@@ -57,6 +62,14 @@ The stress suite is included by default and carries the CTest `stress` label.
 Use `ctest --test-dir build -LE stress --output-on-failure` for only the focused
 tests, or `-L stress` for only the stress suite. Disable building stress tests with
 `-DTHREADFORGE_BUILD_STRESS_TESTS=OFF`.
+
+Warnings-as-errors is optional outside CI and applies only to project targets;
+consumers do not inherit that warning policy. When Python 3 is available, CTest
+also runs the benchmark-summary regressions. The
+[CI workflow](.github/workflows/ci.yml) configures Ubuntu 24.04 GCC Debug/Release,
+Clang Release, ASan/UBSan, and TSan lanes. Read an actual hosted workflow run
+before reporting its result; local results are in
+[docs/validation.md](docs/validation.md).
 
 ## Sanitizers
 
@@ -200,7 +213,7 @@ for user tasks to return; it cannot interrupt them.
 3. **Priorities and weighted fairness** — complete.
 4. **Dependency graph scheduling** — complete; explicit task-state APIs remain future work.
 5. **Metrics and reproducible performance comparisons** — complete.
-6. Stress testing, sanitizers, CI, documentation, and examples.
+6. **Stress testing, sanitizers, CI, documentation, and examples** — complete; hosted run results are tracked separately.
 7. Optional advanced scheduling and optimization.
 
 Queues remain mutex-protected. Performance claims require measured results for

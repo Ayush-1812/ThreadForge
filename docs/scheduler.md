@@ -1,4 +1,4 @@
-# Scheduler API: Phase 4
+# Scheduler API: Phase 6
 
 Include `<threadforge/scheduler.hpp>` and link `threadforge::threadforge`.
 
@@ -8,6 +8,7 @@ Include `<threadforge/scheduler.hpp>` and link `threadforge::threadforge`.
 threadforge::Scheduler automatic;
 threadforge::Scheduler four_workers(4);
 threadforge::Scheduler configured(threadforge::Config{4});
+threadforge::Scheduler timed(threadforge::Config{4, true});
 ```
 
 The default configuration uses the reported hardware concurrency with a one-worker
@@ -16,6 +17,9 @@ failures propagate, with already-created workers shut down before construction
 unwinds. Scheduler objects are neither copyable nor movable.
 
 `worker_count()` returns the configured count, including after shutdown.
+`Config::enable_timing` defaults to `false`. Enable it before construction to
+collect execution, queue, dependency, and idle-wait durations; the configuration
+does not change during the scheduler's lifetime.
 
 ## Submission and futures
 
@@ -135,6 +139,12 @@ configured worker. Reading metrics does not synchronize user task data.
 | Field | Meaning |
 | --- | --- |
 | `tasks_submitted` | Accepted tasks, including children waiting on prerequisites |
+| `tasks_started`, `tasks_completed` | Execution starts and finished executions, including throwing tasks |
+| `tasks_failed` | Exceptions escaping callable invocation; settled failures also count as completed |
+| `submitted_by_priority`, `tasks_by_priority` | Accepted/completed counts indexed High, Normal, Low |
+| `tasks_pending` | All accepted unfinished tasks |
+| `tasks_ready`, `tasks_running`, `tasks_waiting_dependencies` | The current partition of pending work |
+| `peak_tasks_pending` | Largest accepted unfinished-task count |
 | `local_tasks` | Tasks claimed from the executing worker's own deque |
 | `global_tasks` | Tasks claimed from injection or intrusive global ready lists |
 | `tasks_stolen` | Tasks claimed from another worker's deque |
@@ -145,11 +155,22 @@ Per-worker fields use the same definitions; steals belong to the executing thief
 and a worker never counts probing itself. A one-worker scheduler has no steal
 attempts. An empty victim can produce three failed probes in a full scan, one per
 priority lane. Claims are counted before invocation, so these counters classify
-started tasks rather than successful completions. Throwing tasks still count as claims.
+claims rather than successful completions. Throwing tasks still count as claims
+and completions; failure accounting surrounds callable invocation.
 
 Individual counters use relaxed atomic reads. Live snapshots can combine different
 instants and are unsuitable for a synchronization or completion barrier. After
 `shutdown()` returns, totals are stable and
 `tasks_submitted == local_tasks + global_tasks + tasks_stolen`.
 
-No immediate shutdown, cancellation, or dependency mutation API exists in Phase 4.
+Pending-work gauges are sampled together under the scheduler state mutex and
+remain internally consistent; worker counters are read separately. A future can
+become ready before the last completion-counter update, so `future.get()` alone
+does not establish settled telemetry. Optional durations remain zero when timing
+is disabled. `write_metrics(output, snapshot)` prints aggregate and per-worker
+telemetry. See [Runtime metrics](metrics.md) for every field, duration boundary,
+failure-accounting limits, and final invariants.
+
+No immediate shutdown, cancellation, or dependency mutation API exists in Phase 6.
+Testing, warning policy, and automated-check scope are in
+[Testing and hardening](hardening.md).

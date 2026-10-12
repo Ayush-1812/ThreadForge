@@ -2,6 +2,8 @@
 #include "threadforge/worker.hpp"
 
 #include <new>
+#include <algorithm>
+#include <chrono>
 #include <unordered_set>
 
 namespace threadforge::detail {
@@ -17,11 +19,30 @@ struct DependencyState {
     bool completed = false;
     std::vector<std::weak_ptr<DependencyState>> dependents;
     DependencyState* next_ready = nullptr;
+    std::uint64_t admitted_ns = 0;
+    std::uint64_t ready_ns = 0;
+    std::uint64_t started_ns = 0;
 };
 
 } // namespace threadforge::detail
 
 namespace threadforge {
+
+namespace {
+std::uint64_t now_ns() noexcept {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+void record_duration(std::atomic<std::uint64_t>& total,
+                     std::atomic<std::uint64_t>& maximum, std::uint64_t duration) noexcept {
+    total.fetch_add(duration, std::memory_order_relaxed);
+    // Only the owning worker writes its counters; concurrent readers use atomics.
+    if (duration > maximum.load(std::memory_order_relaxed)) {
+        maximum.store(duration, std::memory_order_relaxed);
+    }
+}
+} // namespace
 
 bool TaskHandle::valid() const noexcept {
     return state_ && !state_->owner.expired();
@@ -95,9 +116,11 @@ TaskHandle Scheduler::admit(Task task, Priority priority,
     node->priority = priority;
     std::weak_ptr<detail::DependencyState> weak_node = node;
     node->ready_task = Task([this, weak_node, inner = std::move(task)]() mutable {
+        const auto executing = weak_node.lock();
+        start_task(*executing);
         // The typed future is ready before the completion event releases children.
         inner();
-        complete(weak_node.lock());
+        complete(executing);
     });
     std::vector<std::shared_ptr<detail::DependencyState>> parents;
     parents.reserve(prerequisites.size());
@@ -159,6 +182,21 @@ TaskHandle Scheduler::admit(Task task, Priority priority,
                 }
             }
         }
+        // Queue consumers cannot start until this admission lock is released.
+        if (config_.enable_timing) {
+            node->admitted_ns = now_ns();
+            if (node->remaining == 0) {
+                node->ready_ns = node->admitted_ns;
+            }
+        }
+        if (node->remaining == 0) {
+            ++tasks_ready_;
+        } else {
+            ++tasks_waiting_dependencies_;
+        }
+        peak_tasks_pending_ = std::max(peak_tasks_pending_,
+            static_cast<std::uint64_t>(active_nodes_.size()));
+        ++submitted_by_priority_[detail::priority_index(priority)];
         tasks_submitted_.fetch_add(1, std::memory_order_relaxed);
         ++wake_generation_;
     }
@@ -178,14 +216,45 @@ void Scheduler::publish_ready_locked(detail::DependencyState& node) noexcept {
     ready_tails_[lane] = &node;
 }
 
+void Scheduler::start_task(detail::DependencyState& node) noexcept {
+    auto& metrics = detail::Worker::current()->metrics_;
+    {
+        std::lock_guard lock(state_mutex_);
+        --tasks_ready_;
+        ++tasks_running_;
+        if (config_.enable_timing) {
+            node.started_ns = now_ns();
+            record_duration(metrics.total_queue_wait_ns, metrics.max_queue_wait_ns,
+                            node.started_ns - node.ready_ns);
+        }
+    }
+    metrics.tasks_started.fetch_add(1, std::memory_order_relaxed);
+}
+
+void Scheduler::record_failure() noexcept {
+    detail::Worker::current()->metrics_.tasks_failed.fetch_add(1, std::memory_order_relaxed);
+}
+
 void Scheduler::complete(const std::shared_ptr<detail::DependencyState>& node) noexcept {
+    auto& metrics = detail::Worker::current()->metrics_;
+    if (config_.enable_timing) {
+        record_duration(metrics.total_execution_ns, metrics.max_execution_ns,
+                        now_ns() - node->started_ns);
+    }
     bool wake = false;
     {
         std::lock_guard lock(state_mutex_);
         node->completed = true;
+        --tasks_running_;
         for (const auto& dependent : node->dependents) {
             if (auto child = dependent.lock()) {
                 if (--child->remaining == 0) {
+                    --tasks_waiting_dependencies_;
+                    ++tasks_ready_;
+                    if (config_.enable_timing) {
+                        child->ready_ns = now_ns();
+                        total_dependency_wait_ns_ += child->ready_ns - child->admitted_ns;
+                    }
                     publish_ready_locked(*child);
                     wake = true;
                 }
@@ -193,6 +262,9 @@ void Scheduler::complete(const std::shared_ptr<detail::DependencyState>& node) n
         }
         node->dependents.clear();
         active_nodes_.erase(node.get());
+        metrics.tasks_by_priority[detail::priority_index(node->priority)].fetch_add(
+            1, std::memory_order_relaxed);
+        metrics.tasks_completed.fetch_add(1, std::memory_order_relaxed);
         if (wake || (!accepting_ && active_nodes_.empty())) {
             ++wake_generation_;
             wake = true;
@@ -252,9 +324,14 @@ std::optional<Task> Scheduler::take_task(detail::Worker& worker) {
             return std::nullopt;
         }
         worker.metrics_.waits.fetch_add(1, std::memory_order_relaxed);
+        const auto wait_started = config_.enable_timing ? now_ns() : 0;
         work_available_.wait(lock, [&] {
             return wake_generation_ != observed_generation || (!accepting_ && active_nodes_.empty());
         });
+        if (config_.enable_timing) {
+            worker.metrics_.total_idle_wait_ns.fetch_add(now_ns() - wait_started,
+                                                        std::memory_order_relaxed);
+        }
     }
 }
 
@@ -291,7 +368,18 @@ std::optional<Task> Scheduler::try_take_task(detail::Worker& worker, Priority pr
 
 MetricsSnapshot Scheduler::metrics() const {
     MetricsSnapshot result;
-    result.tasks_submitted = tasks_submitted_.load(std::memory_order_relaxed);
+    result.timing_enabled = config_.enable_timing;
+    {
+        std::lock_guard lock(state_mutex_);
+        result.tasks_submitted = tasks_submitted_.load(std::memory_order_relaxed);
+        result.submitted_by_priority = submitted_by_priority_;
+        result.tasks_ready = tasks_ready_;
+        result.tasks_running = tasks_running_;
+        result.tasks_pending = active_nodes_.size();
+        result.tasks_waiting_dependencies = tasks_waiting_dependencies_;
+        result.peak_tasks_pending = peak_tasks_pending_;
+        result.total_dependency_wait_ns = total_dependency_wait_ns_;
+    }
     result.workers.reserve(workers_.size());
     for (const auto& worker : workers_) {
         const auto snapshot = worker->metrics_.snapshot();
@@ -300,6 +388,17 @@ MetricsSnapshot Scheduler::metrics() const {
         result.tasks_stolen += snapshot.tasks_stolen;
         result.failed_steal_attempts += snapshot.failed_steal_attempts;
         result.waits += snapshot.waits;
+        result.tasks_started += snapshot.tasks_started;
+        result.tasks_completed += snapshot.tasks_completed;
+        result.tasks_failed += snapshot.tasks_failed;
+        result.total_execution_ns += snapshot.total_execution_ns;
+        result.max_execution_ns = std::max(result.max_execution_ns, snapshot.max_execution_ns);
+        result.total_queue_wait_ns += snapshot.total_queue_wait_ns;
+        result.max_queue_wait_ns = std::max(result.max_queue_wait_ns, snapshot.max_queue_wait_ns);
+        result.total_idle_wait_ns += snapshot.total_idle_wait_ns;
+        for (std::size_t lane = 0; lane < detail::priority_count; ++lane) {
+            result.tasks_by_priority[lane] += snapshot.tasks_by_priority[lane];
+        }
         result.workers.push_back(snapshot);
     }
     return result;

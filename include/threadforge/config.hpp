@@ -11,6 +11,8 @@ struct Config {
         const auto count = std::thread::hardware_concurrency();
         return count == 0 ? std::size_t{1} : static_cast<std::size_t>(count);
     }();
+    // Collect steady-clock durations in addition to always-on counters.
+    bool enable_timing = false;
 };
 
 } // namespace threadforge

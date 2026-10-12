@@ -94,11 +94,16 @@ public:
         -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
         static_cast<void>(detail::priority_index(priority));
         using Result = std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>;
-        auto invocation = [callable = std::forward<Function>(function),
+        auto invocation = [this, callable = std::forward<Function>(function),
                            arguments = std::make_tuple(std::forward<Args>(args)...)]() mutable -> Result {
-            return std::apply([&callable](auto&&... values) -> Result {
-                return std::invoke(std::move(callable), std::forward<decltype(values)>(values)...);
-            }, std::move(arguments));
+            try {
+                return std::apply([&callable](auto&&... values) -> Result {
+                    return std::invoke(std::move(callable), std::forward<decltype(values)>(values)...);
+                }, std::move(arguments));
+            } catch (...) {
+                record_failure();
+                throw;
+            }
         };
         std::packaged_task<Result()> result_task(std::move(invocation));
         auto result = result_task.get_future();
@@ -118,6 +123,8 @@ private:
     [[nodiscard]] TaskHandle admit(Task task, Priority priority,
                                    std::span<const TaskHandle> prerequisites);
     void complete(const std::shared_ptr<detail::DependencyState>& node) noexcept;
+    void start_task(detail::DependencyState& node) noexcept;
+    void record_failure() noexcept;
     void publish_ready_locked(detail::DependencyState& node) noexcept;
     [[nodiscard]] std::optional<Task> take_dependency_ready(Priority priority);
     [[nodiscard]] std::optional<Task> take_task(detail::Worker& worker);
@@ -131,6 +138,12 @@ private:
     bool accepting_ = true;
     std::uint64_t wake_generation_ = 0;
     std::atomic<std::uint64_t> tasks_submitted_{0};
+    std::array<std::uint64_t, detail::priority_count> submitted_by_priority_{};
+    std::uint64_t tasks_ready_ = 0;
+    std::uint64_t tasks_running_ = 0;
+    std::uint64_t tasks_waiting_dependencies_ = 0;
+    std::uint64_t peak_tasks_pending_ = 0;
+    std::uint64_t total_dependency_wait_ns_ = 0;
     const std::shared_ptr<detail::SchedulerIdentity> identity_;
     // These nodes own waiting work; intrusive ready links never outlive admission.
     std::unordered_map<detail::DependencyState*, std::shared_ptr<detail::DependencyState>> active_nodes_;

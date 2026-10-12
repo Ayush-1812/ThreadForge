@@ -119,11 +119,11 @@ TEST(PriorityQueue, InvalidPrioritiesRejectWithoutRemovingExistingWork) {
     EXPECT_TRUE(global.push(threadforge::Task([&] { ++executions; }), Priority::High));
     local.push(threadforge::Task([&] { ++executions; }), Priority::Low);
     for (const auto invalid : {static_cast<Priority>(-1), static_cast<Priority>(3)}) {
-        EXPECT_THROW(global.push(threadforge::Task([] {}), invalid), std::invalid_argument);
-        EXPECT_THROW(global.try_pop(invalid), std::invalid_argument);
+        EXPECT_THROW(static_cast<void>(global.push(threadforge::Task([] {}), invalid)), std::invalid_argument);
+        EXPECT_THROW(static_cast<void>(global.try_pop(invalid)), std::invalid_argument);
         EXPECT_THROW(local.push(threadforge::Task([] {}), invalid), std::invalid_argument);
-        EXPECT_THROW(local.try_pop(invalid), std::invalid_argument);
-        EXPECT_THROW(local.try_steal(invalid), std::invalid_argument);
+        EXPECT_THROW(static_cast<void>(local.try_pop(invalid)), std::invalid_argument);
+        EXPECT_THROW(static_cast<void>(local.try_steal(invalid)), std::invalid_argument);
     }
     execute(global.try_pop(Priority::High));
     execute(local.try_steal(Priority::Low));

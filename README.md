@@ -15,7 +15,7 @@ stealing across CPU workers.
 - Callable submission with arguments, move-only captures, and `std::future` results.
 - Task exceptions delivered through futures without terminating workers.
 - Graceful shutdown that drains accepted tasks and joins every worker.
-- GoogleTest coverage and a runnable example.
+- Deterministic priority tests and runnable runtime, stealing, and priority examples.
 - Shutdown race regressions and 100,000-task stress workloads.
 
 The runtime design is described in [docs/architecture.md](docs/architecture.md),
@@ -103,7 +103,7 @@ auto metrics = scheduler.metrics();
 auto claimed = metrics.local_tasks + metrics.global_tasks + metrics.tasks_stolen;
 ```
 
-Snapshots include per-worker counts, failed victim probes, and wait episodes.
+Snapshots include per-worker counts, failed victim-priority-lane probes, and wait episodes.
 Live snapshots are approximate across counters; call `shutdown()` before relying
 on final totals. Wait counts measure wait entries, not idle time.
 

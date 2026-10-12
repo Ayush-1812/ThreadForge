@@ -1,7 +1,8 @@
-# Architecture: Phase 2
+# Architecture: Phase 3
 
-ThreadForge combines a global injection queue with one mutex-protected deque per
-worker. External submissions enter the global FIFO queue. Submissions from a
+ThreadForge combines a global injection queue with one mutex-protected queue per
+worker. Every queue has separate High, Normal, and Low lanes. External submissions
+enter the global queue, which is FIFO within each lane. Submissions from a
 worker of the same scheduler enter that worker's local queue. Submitting to a
 different scheduler counts as an external submission for the receiving scheduler.
 
@@ -30,23 +31,39 @@ returned future's `get()`.
 
 | Shared state | Synchronization |
 | --- | --- |
-| Global queue contents and closed flag | Global queue mutex |
-| Each local deque | Its own queue mutex |
+| Global priority lanes and closed flag | Global queue mutex |
+| Each local queue's three priority lanes | Its own queue mutex |
 | Admission and wake generation | Scheduler state mutex |
 | Sleeping workers | Scheduler condition variable with a generation predicate |
 | Worker joins | Scheduler shutdown mutex serializes external callers |
 | Results and task exceptions | Standard future shared state |
 | Worker identity | Thread-local worker pointer, accessed only by the current thread |
 | Counters | Per-worker relaxed atomics; submitted count uses a relaxed atomic |
-| Victim cursor | Accessed only by its owning worker |
+| Victim and priority cursors | Accessed only by their owning worker |
 | Worker count | Immutable configuration after construction |
 
 ## Scheduling and waiting
 
-A worker tries its own deque, then the global FIFO queue, then every other worker's
-deque before sleeping. The owner pushes and pops the front (LIFO), while a thief
-pops the back (oldest first). Victim selection rotates between scans and successful
-steals. A stolen task executes directly rather than moving between ready queues.
+A worker chooses a priority class before selecting a source. For that class it
+tries its own lane, then the global FIFO lane, then every other worker's lane.
+Only after all those sources yield no task does it try the next class. The owner
+pushes and pops the front (LIFO) within a lane, while a thief pops the back (oldest
+first). Victim selection rotates between class scans and successful steals. A
+stolen task executes directly rather than moving between ready queues.
+
+Each worker has a service cursor over a fixed ring of eight High slots, four
+Normal slots, and one Low slot, initially pointing to High. A scan tries the
+three distinct classes in first-occurrence order from that cursor. A successful
+claim advances to the slot after the chosen class's first occurrence; empty
+classes are skipped, and an unsuccessful scan does not advance the cursor.
+With all classes continually claimable, each worker serves 8 High, 4 Normal, and
+1 Low task per 13 claims. This deliberately allows lower-priority service while
+High work is queued. The full policy and its conditional fairness limits are in
+[Priority scheduling](priorities.md).
+
+There is no atomic scan across queues. Publication and claims by other workers
+can change readiness during selection, so the policy does not impose a total
+priority ordering over concurrent execution.
 
 The worker snapshots a wake generation under the state mutex before scanning.
 Every accepted publication increments that generation under the same mutex and
@@ -88,20 +105,24 @@ graceful shutdown protocol as an explicit call.
 
 ## Boundaries and tradeoffs
 
-The global FIFO and local LIFO policies describe selection order; concurrent
-execution and completion order are unspecified. Always checking local work first
-can delay global work during continuous nested submissions. Priorities and fairness
-remain Phase 3 work. Unbounded admission can exhaust memory, and the shared
-publication gate and queue mutexes can become contention points. No lock-free
+The per-lane global FIFO and local LIFO policies describe selection order;
+concurrent execution and completion order are unspecified. Weighted service gives
+priority classes opportunities under sustained load, without an elapsed-time
+bound or fairness guarantee for individual tasks. Local LIFO can postpone old
+local tasks, and local-source preference can delay global or victim tasks of the
+same class indefinitely. Priorities are explicit, default to Normal, and are not
+inherited by nested submissions. Unbounded admission can exhaust memory, and the
+shared publication gate and queue mutexes can become contention points. No lock-free
 algorithm or performance advantage is claimed without measurement.
 
 `metrics()` aggregates submitted tasks, local/global claims, successful steals,
-failed victim probes, and wait episodes. The per-worker counters use relaxed atomics
-and do not establish synchronization. A live snapshot can mix different instants;
+failed victim-priority-lane probes, and wait episodes. The per-worker counters use
+relaxed atomics and do not establish synchronization. A live snapshot can mix different instants;
 after shutdown the counters are stable and every accepted task has exactly one
 local/global/stolen classification. Successful steals are charged to the thief.
-Failed probes include empty victim queues; no self-probe is counted. Wait episodes
-count entries into a condition-variable wait, not elapsed idle time.
+An empty victim can produce three failed probes in a full scan, one per priority
+lane; no self-probe is counted. Wait episodes count entries into a
+condition-variable wait, not elapsed idle time.
 
 Tasks must terminate for graceful shutdown to finish. The runtime does not forcibly
 interrupt user code. Blocking all workers on futures for work submitted to their
@@ -114,7 +135,9 @@ or shutdown of multiple schedulers remain the application's responsibility.
 
 ## Repository evolution
 
-Phase 2 adds `work_stealing_queue.hpp/.cpp`, `metrics.hpp/.cpp`, and dedicated
-`stealing_test.cpp` coverage. The Phase 1 queue retains its blocking API for direct
-consumers and tests; runtime workers use its nonblocking `try_pop()` and the
-scheduler-wide waiting protocol. No empty priority or dependency classes exist.
+Phase 3 adds `priority.hpp`, priority lanes in both queue types, the weighted
+worker service cursor, and dedicated `priority_test.cpp` coverage. Phase 2 work
+stealing and metrics remain in place. The global queue retains its blocking API
+for direct consumers and tests; runtime workers use its priority-specific
+nonblocking `try_pop()` and the scheduler-wide waiting protocol. No dependency
+scheduler is implemented yet.

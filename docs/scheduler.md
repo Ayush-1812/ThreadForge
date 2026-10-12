@@ -1,4 +1,4 @@
-# Scheduler API: Phase 2
+# Scheduler API: Phase 3
 
 Include `<threadforge/scheduler.hpp>` and link `threadforge::threadforge`.
 
@@ -19,8 +19,12 @@ unwinds. Scheduler objects are neither copyable nor movable.
 
 ## Submission and futures
 
-`submit(callable, args...)` returns `std::future<Result>`, including `void` and
-reference result types. Callable and argument storage follows decayed value
+`submit(callable, args...)` and `submit(Priority, callable, args...)` return
+`std::future<Result>`, including `void` and reference result types. The first
+overload uses `Priority::Normal`; the second accepts `Priority::High`, `Normal`,
+or `Low`. Nested submissions default to Normal and do not inherit their parent's
+priority. Invalid priority enum values throw `std::invalid_argument` before the
+task is accepted. Callable and argument storage follows decayed value
 semantics. The callable and arguments are moved for their single invocation;
 explicit `std::ref` arguments preserve references. Callables must be invocable
 with the stored argument types and their intended move/reference semantics.
@@ -29,6 +33,7 @@ with the stored argument types and their intended move/reference semantics.
 auto value = scheduler.submit([](int a, int b) { return a + b; }, 10, 20);
 auto moved = scheduler.submit(
     [](std::unique_ptr<int> p) { return *p; }, std::make_unique<int>(42));
+auto urgent = scheduler.submit(threadforge::Priority::High, [] { return 7; });
 ```
 
 Keep captured pointers, reference arguments, and reference results valid for their
@@ -38,9 +43,18 @@ scheduler publishes to its local deque; an external thread or a worker belonging
 to a different scheduler publishes to the receiving scheduler's global queue.
 A task submitted during graceful draining is rejected, including nested tasks.
 
-Owners take newer local tasks first. Workers check their local queue, then global
-work, then steal older work from other workers' queues. There is no total FIFO
-ordering or guarantee of fairness under continuous nested submissions.
+Each queue has three priority lanes. Workers choose a class before checking its
+local lane, global lane, then other workers' lanes. Within that class, owners take
+newer local tasks first, global tasks are FIFO, and thieves take older victim
+tasks first. Each worker uses a weighted ring of 8 High, 4 Normal, and 1 Low slot,
+skips empty classes, and advances only on a successful claim. This provides
+conditional class service opportunities rather than strict priority ordering or
+fairness for individual tasks. Running tasks are not preempted. See
+[Priority scheduling](priorities.md) for the cursor rules, fairness bounds, and
+deterministic example.
+
+Calling `future.get()` from a scheduler worker can deadlock if every worker waits
+for queued child tasks; priority scheduling does not add cooperative waiting.
 
 An allocation failure during submission throws without accepting that task.
 Submission after closure throws `std::runtime_error`. Exceptions thrown by an
@@ -74,17 +88,18 @@ configured worker. Reading metrics does not synchronize user task data.
 | `local_tasks` | Tasks claimed from the executing worker's own deque |
 | `global_tasks` | Tasks claimed from the global injection queue |
 | `tasks_stolen` | Tasks claimed from another worker's deque |
-| `failed_steal_attempts` | Victim deque probes that returned no task |
+| `failed_steal_attempts` | Victim-priority-lane probes that returned no task |
 | `waits` | Entries into the worker condition-variable wait |
 
 Per-worker fields use the same definitions; steals belong to the executing thief,
 and a worker never counts probing itself. A one-worker scheduler has no steal
-attempts. Claims are counted before invocation, so these counters classify started
-tasks rather than successful completions. Throwing tasks still count as claims.
+attempts. An empty victim can produce three failed probes in a full scan, one per
+priority lane. Claims are counted before invocation, so these counters classify
+started tasks rather than successful completions. Throwing tasks still count as claims.
 
 Individual counters use relaxed atomic reads. Live snapshots can combine different
 instants and are unsuitable for a synchronization or completion barrier. After
 `shutdown()` returns, totals are stable and
 `tasks_submitted == local_tasks + global_tasks + tasks_stolen`.
 
-No immediate shutdown, cancellation, priority, or dependency API exists in Phase 2.
+No immediate shutdown, cancellation, or dependency API exists in Phase 3.

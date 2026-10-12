@@ -10,7 +10,7 @@
 
 namespace threadforge {
 
-// The owner pushes/pops the front; thieves remove the oldest task from the back.
+// Within each priority lane, owners push/pop the front; thieves pop the back.
 class WorkStealingQueue {
 public:
     WorkStealingQueue() = default;

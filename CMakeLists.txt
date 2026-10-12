@@ -64,12 +64,12 @@ if(THREADFORGE_BUILD_TESTS)
     find_package(GTest REQUIRED)
     include(GoogleTest)
     add_executable(threadforge_tests tests/scheduler_test.cpp tests/queue_test.cpp
-        tests/stealing_test.cpp tests/priority_test.cpp)
+        tests/stealing_test.cpp tests/priority_test.cpp tests/priority_api_test.cpp)
     target_link_libraries(threadforge_tests PRIVATE threadforge::threadforge GTest::gtest_main)
     gtest_discover_tests(threadforge_tests DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 30)
     if(THREADFORGE_BUILD_STRESS_TESTS)
-        add_executable(threadforge_stress_tests tests/stress_test.cpp)
+        add_executable(threadforge_stress_tests tests/stress_test.cpp tests/priority_stress_test.cpp)
         target_link_libraries(threadforge_stress_tests PRIVATE threadforge::threadforge GTest::gtest_main)
         gtest_discover_tests(threadforge_stress_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
             PROPERTIES TIMEOUT 120 LABELS stress)

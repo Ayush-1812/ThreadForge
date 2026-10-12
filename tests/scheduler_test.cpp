@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <latch>
 #include <memory>
@@ -175,6 +176,85 @@ TEST(Scheduler, AllowsNestedSubmissionWithoutBlockingWorker) {
     auto parent = scheduler.submit([&] { return scheduler.submit([] { return 17; }); });
     auto child = parent.get();
     EXPECT_EQ(child.get(), 17);
+}
+
+TEST(Scheduler, ShutdownWaitsForRunningAndQueuedWork) {
+    threadforge::Scheduler scheduler(1);
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    std::latch running(1);
+    auto first = scheduler.submit([&running, gate] {
+        running.count_down();
+        gate.wait();
+        return 1;
+    });
+    running.wait();
+    auto second = scheduler.submit([] { return 2; });
+    auto shutdown = std::async(std::launch::async, [&] { scheduler.shutdown(); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!scheduler.is_shutdown() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(scheduler.is_shutdown());
+    EXPECT_EQ(shutdown.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    EXPECT_EQ(second.wait_for(std::chrono::seconds(0)), std::future_status::timeout);
+    EXPECT_THROW(scheduler.submit([] {}), std::runtime_error);
+    release.set_value();
+    shutdown.get();
+    EXPECT_EQ(first.get(), 1);
+    EXPECT_EQ(second.get(), 2);
+}
+
+TEST(Scheduler, WorkerShutdownDoesNotBlockBehindExternalJoin) {
+    threadforge::Scheduler scheduler(1);
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    std::latch running(1);
+    auto task = scheduler.submit([&scheduler, &running, gate] {
+        running.count_down();
+        gate.wait();
+        scheduler.shutdown();
+    });
+    running.wait();
+    auto shutdown = std::async(std::launch::async, [&] { scheduler.shutdown(); });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!scheduler.is_shutdown() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_TRUE(scheduler.is_shutdown());
+    release.set_value();
+    EXPECT_THROW(task.get(), std::logic_error);
+    shutdown.get();
+}
+
+TEST(Scheduler, CanShutDownAnotherSchedulerFromAWorker) {
+    threadforge::Scheduler other(1);
+    threadforge::Scheduler scheduler(1);
+    scheduler.submit([&other] { other.shutdown(); }).get();
+    EXPECT_TRUE(other.is_shutdown());
+    EXPECT_FALSE(scheduler.is_shutdown());
+}
+
+TEST(Scheduler, FuturesRetainExceptionsAfterDestruction) {
+    std::future<void> result;
+    {
+        threadforge::Scheduler scheduler(1);
+        result = scheduler.submit([] { throw std::logic_error("retained failure"); });
+    }
+    EXPECT_THROW(result.get(), std::logic_error);
+}
+
+TEST(Scheduler, CopiesOrdinaryLvalueArgumentsBeforeExecution) {
+    threadforge::Scheduler scheduler(1);
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    auto blocker = scheduler.submit([gate] { gate.wait(); });
+    int input = 42;
+    auto result = scheduler.submit([](int value) { return value; }, input);
+    input = 99;
+    release.set_value();
+    blocker.get();
+    EXPECT_EQ(result.get(), 42);
 }
 
 } // namespace

@@ -12,6 +12,10 @@ queues and work stealing.
 - Task exceptions delivered through futures without terminating workers.
 - Graceful shutdown that drains accepted tasks and joins every worker.
 - GoogleTest coverage and a runnable example.
+- Shutdown race regressions and 100,000-task stress workloads.
+
+The runtime design is described in [docs/architecture.md](docs/architecture.md),
+with API contracts in [docs/scheduler.md](docs/scheduler.md).
 
 ## Build and test
 
@@ -31,6 +35,33 @@ ctest --test-dir build --output-on-failure
 GoogleTest is resolved using `find_package(GTest REQUIRED)`; builds do not download
 dependencies. Use `-DTHREADFORGE_BUILD_TESTS=OFF` to build only the library and
 examples. Link consumers against `threadforge::threadforge` after `add_subdirectory`.
+
+The stress suite is included by default and carries the CTest `stress` label.
+Use `ctest --test-dir build -LE stress --output-on-failure` for only the focused
+tests, or `-L stress` for only the stress suite. Disable building stress tests with
+`-DTHREADFORGE_BUILD_STRESS_TESTS=OFF`.
+
+## Sanitizers
+
+Use separate build directories with GCC or Clang:
+
+```sh
+cmake -S . -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DTHREADFORGE_ENABLE_ASAN=ON -DTHREADFORGE_ENABLE_UBSAN=ON
+cmake --build build-asan
+ctest --test-dir build-asan --output-on-failure
+
+cmake -S . -B build-tsan -G Ninja -DCMAKE_BUILD_TYPE=Debug \
+  -DTHREADFORGE_ENABLE_TSAN=ON
+cmake --build build-tsan
+ctest --test-dir build-tsan --output-on-failure
+```
+
+ASan and TSan cannot be combined; configuration rejects that combination.
+Sanitizer options propagate to consumers and fail on detected violations.
+See [docs/validation.md](docs/validation.md) for measured validation and environment
+limitations. Benchmarks are planned for Phase 5; their methodology is outlined in
+[docs/benchmarks.md](docs/benchmarks.md).
 
 ## Usage
 

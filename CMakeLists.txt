@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ThreadForge VERSION 0.3.0 LANGUAGES CXX)
+project(ThreadForge VERSION 0.4.0 LANGUAGES CXX)
 
 option(THREADFORGE_BUILD_TESTS "Build the GoogleTest test suite" ON)
 option(THREADFORGE_BUILD_EXAMPLES "Build examples" ON)
@@ -53,7 +53,7 @@ else()
 endif()
 
 if(THREADFORGE_BUILD_EXAMPLES)
-    foreach(example IN ITEMS basic work_stealing priorities)
+    foreach(example IN ITEMS basic work_stealing priorities dependency_graph)
         add_executable(threadforge_${example} examples/${example}.cpp)
         target_link_libraries(threadforge_${example} PRIVATE threadforge::threadforge)
     endforeach()
@@ -64,12 +64,14 @@ if(THREADFORGE_BUILD_TESTS)
     find_package(GTest REQUIRED)
     include(GoogleTest)
     add_executable(threadforge_tests tests/scheduler_test.cpp tests/queue_test.cpp
-        tests/stealing_test.cpp tests/priority_test.cpp tests/priority_api_test.cpp)
+        tests/stealing_test.cpp tests/priority_test.cpp tests/priority_api_test.cpp
+        tests/dependency_test.cpp)
     target_link_libraries(threadforge_tests PRIVATE threadforge::threadforge GTest::gtest_main)
     gtest_discover_tests(threadforge_tests DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 30)
     if(THREADFORGE_BUILD_STRESS_TESTS)
-        add_executable(threadforge_stress_tests tests/stress_test.cpp tests/priority_stress_test.cpp)
+        add_executable(threadforge_stress_tests tests/stress_test.cpp tests/priority_stress_test.cpp
+            tests/dependency_stress_test.cpp)
         target_link_libraries(threadforge_stress_tests PRIVATE threadforge::threadforge GTest::gtest_main)
         gtest_discover_tests(threadforge_stress_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
             PROPERTIES TIMEOUT 120 LABELS stress)

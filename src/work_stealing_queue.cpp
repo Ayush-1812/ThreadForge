@@ -6,12 +6,17 @@
 namespace threadforge {
 
 void WorkStealingQueue::push(Task task, Priority priority) {
+    push_preserving(task, priority);
+}
+
+void WorkStealingQueue::push_preserving(Task& task, Priority priority) {
     const auto lane = detail::priority_index(priority);
     if (!task.valid()) {
         throw std::invalid_argument("cannot enqueue an empty task");
     }
     std::lock_guard lock(mutex_);
-    tasks_[lane].push_front(std::move(task));
+    tasks_[lane].emplace_front();
+    tasks_[lane].front() = std::move(task);
 }
 
 std::optional<Task> WorkStealingQueue::try_pop() {

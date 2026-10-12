@@ -1,13 +1,38 @@
 #include "threadforge/scheduler.hpp"
 #include "threadforge/worker.hpp"
 
+#include <new>
+#include <unordered_set>
+
+namespace threadforge::detail {
+
+struct SchedulerIdentity {};
+
+struct DependencyState {
+    std::weak_ptr<SchedulerIdentity> owner;
+    Task ready_task;
+    Priority priority = Priority::Normal;
+    // Registration, completion, counters, and ready links share state_mutex_.
+    std::size_t remaining = 0;
+    bool completed = false;
+    std::vector<std::weak_ptr<DependencyState>> dependents;
+    DependencyState* next_ready = nullptr;
+};
+
+} // namespace threadforge::detail
+
 namespace threadforge {
+
+bool TaskHandle::valid() const noexcept {
+    return state_ && !state_->owner.expired();
+}
 
 Scheduler::Scheduler() : Scheduler(Config{}) {}
 
 Scheduler::Scheduler(std::size_t worker_count) : Scheduler(Config{worker_count}) {}
 
-Scheduler::Scheduler(Config config) : config_(config) {
+Scheduler::Scheduler(Config config)
+    : config_(config), identity_(std::make_shared<detail::SchedulerIdentity>()) {
     if (config_.worker_count == 0) {
         throw std::invalid_argument("ThreadForge requires at least one worker");
     }
@@ -63,25 +88,124 @@ void Scheduler::close_submission() {
     work_available_.notify_all();
 }
 
-void Scheduler::enqueue(Task task, Priority priority) {
+TaskHandle Scheduler::admit(Task task, Priority priority,
+                            std::span<const TaskHandle> prerequisites) {
+    auto node = std::make_shared<detail::DependencyState>();
+    node->owner = identity_;
+    node->priority = priority;
+    std::weak_ptr<detail::DependencyState> weak_node = node;
+    node->ready_task = Task([this, weak_node, inner = std::move(task)]() mutable {
+        // The typed future is ready before the completion event releases children.
+        inner();
+        complete(weak_node.lock());
+    });
+    std::vector<std::shared_ptr<detail::DependencyState>> parents;
+    parents.reserve(prerequisites.size());
+    std::unordered_set<detail::DependencyState*> seen;
+    seen.reserve(prerequisites.size());
+    for (const auto& prerequisite : prerequisites) {
+        if (!prerequisite.state_ || prerequisite.state_->owner.lock() != identity_) {
+            throw std::invalid_argument("dependency must belong to this ThreadForge scheduler");
+        }
+        if (seen.insert(prerequisite.state_.get()).second) {
+            parents.push_back(prerequisite.state_);
+        }
+    }
     {
-        // Admission and queue publication are atomic with respect to closure.
-        // Queue consumers never take this lock while holding a queue lock.
+        // Holding strong references outside the lock defers callable destruction
+        // until after unlocking, including failed admission and rollback paths.
         std::lock_guard lock(state_mutex_);
         if (!accepting_) {
             throw std::runtime_error("ThreadForge scheduler is shut down");
         }
-        auto* worker = detail::Worker::current();
-        if (worker && &worker->scheduler_ == this) {
-            worker->queue_.push(std::move(task), priority);
-        } else if (!queue_.push(std::move(task), priority)) {
-            throw std::runtime_error("ThreadForge scheduler is shut down");
+        for (const auto& parent : parents) {
+            if (!parent->completed) {
+                // Reserve every edge before committing any registration.
+                parent->dependents.reserve(parent->dependents.size() + 1);
+                ++node->remaining;
+            }
+        }
+        active_nodes_.emplace(node.get(), node);
+        if (node->remaining == 0) {
+            try {
+                auto* worker = detail::Worker::current();
+                if (worker && &worker->scheduler_ == this) {
+                    worker->queue_.push_preserving(node->ready_task, priority);
+                } else if (!queue_.push_preserving(node->ready_task, priority)) {
+                    throw std::runtime_error("ThreadForge scheduler is shut down");
+                }
+            } catch (const std::bad_alloc&) {
+                // Accepted work still has storage and can be published without
+                // another allocation if an ordinary deque cannot grow.
+                publish_ready_locked(*node);
+            } catch (...) {
+                active_nodes_.erase(node.get());
+                throw;
+            }
+        } else {
+            for (const auto& parent : parents) {
+                if (!parent->completed) {
+                    parent->dependents.emplace_back(node);
+                }
+            }
         }
         tasks_submitted_.fetch_add(1, std::memory_order_relaxed);
         ++wake_generation_;
     }
-    // Local submissions must also wake an idle thief while the owner is busy.
     work_available_.notify_one();
+    return TaskHandle(std::move(node));
+}
+
+void Scheduler::publish_ready_locked(detail::DependencyState& node) noexcept {
+    // Nodes are already owned by active_nodes_: linking an accepted descendant
+    // never allocates, and remains legal after new submissions have closed.
+    const auto lane = detail::priority_index(node.priority);
+    if (ready_tails_[lane]) {
+        ready_tails_[lane]->next_ready = &node;
+    } else {
+        ready_heads_[lane] = &node;
+    }
+    ready_tails_[lane] = &node;
+}
+
+void Scheduler::complete(const std::shared_ptr<detail::DependencyState>& node) noexcept {
+    bool wake = false;
+    {
+        std::lock_guard lock(state_mutex_);
+        node->completed = true;
+        for (const auto& dependent : node->dependents) {
+            if (auto child = dependent.lock()) {
+                if (--child->remaining == 0) {
+                    publish_ready_locked(*child);
+                    wake = true;
+                }
+            }
+        }
+        node->dependents.clear();
+        active_nodes_.erase(node.get());
+        if (wake || (!accepting_ && active_nodes_.empty())) {
+            ++wake_generation_;
+            wake = true;
+        }
+    }
+    if (wake) {
+        work_available_.notify_all();
+    }
+}
+
+std::optional<Task> Scheduler::take_dependency_ready(Priority priority) {
+    const auto lane = detail::priority_index(priority);
+    std::lock_guard lock(state_mutex_);
+    auto* node = ready_heads_[lane];
+    if (!node) {
+        return std::nullopt;
+    }
+    ready_heads_[lane] = node->next_ready;
+    if (!ready_heads_[lane]) {
+        ready_tails_[lane] = nullptr;
+    }
+    node->next_ready = nullptr;
+    return std::move(node->ready_task);
 }
 
 std::optional<Task> Scheduler::take_task(detail::Worker& worker) {
@@ -114,12 +238,12 @@ std::optional<Task> Scheduler::take_task(detail::Worker& worker) {
         if (wake_generation_ != observed_generation) {
             continue;
         }
-        if (!accepting_) {
+        if (!accepting_ && active_nodes_.empty()) {
             return std::nullopt;
         }
         worker.metrics_.waits.fetch_add(1, std::memory_order_relaxed);
         work_available_.wait(lock, [&] {
-            return wake_generation_ != observed_generation || !accepting_;
+            return wake_generation_ != observed_generation || (!accepting_ && active_nodes_.empty());
         });
     }
 }
@@ -130,6 +254,10 @@ std::optional<Task> Scheduler::try_take_task(detail::Worker& worker, Priority pr
         return task;
     }
     if (auto task = queue_.try_pop(priority)) {
+        worker.metrics_.global_tasks.fetch_add(1, std::memory_order_relaxed);
+        return task;
+    }
+    if (auto task = take_dependency_ready(priority)) {
         worker.metrics_.global_tasks.fetch_add(1, std::memory_order_relaxed);
         return task;
     }

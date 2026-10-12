@@ -4,16 +4,20 @@
 #include "threadforge/metrics.hpp"
 #include "threadforge/priority.hpp"
 #include "threadforge/task_queue.hpp"
+#include "threadforge/task_handle.hpp"
 
 #include <functional>
 #include <condition_variable>
 #include <future>
+#include <initializer_list>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <span>
 #include <tuple>
 #include <type_traits>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace threadforge {
@@ -42,6 +46,52 @@ public:
     template<class Function, class... Args>
     auto submit(Priority priority, Function&& function, Args&&... args)
         -> std::future<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit_task(priority, std::forward<Function>(function),
+                           std::forward<Args>(args)...).future;
+    }
+
+    template<class Function, class... Args>
+    auto submit_task(Function&& function, Args&&... args)
+        -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit_task(Priority::Normal, std::forward<Function>(function),
+                           std::forward<Args>(args)...);
+    }
+
+    template<class Function, class... Args>
+    auto submit_task(Priority priority, Function&& function, Args&&... args)
+        -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit_after(std::span<const TaskHandle>{}, priority,
+                            std::forward<Function>(function), std::forward<Args>(args)...);
+    }
+
+    template<class Function, class... Args>
+    auto submit_after(std::span<const TaskHandle> prerequisites,
+                      Function&& function, Args&&... args)
+        -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit_after(prerequisites, Priority::Normal,
+                            std::forward<Function>(function), std::forward<Args>(args)...);
+    }
+
+    template<class Function, class... Args>
+    auto submit_after(std::initializer_list<TaskHandle> prerequisites,
+                      Function&& function, Args&&... args)
+        -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit_after(std::span<const TaskHandle>(prerequisites.begin(), prerequisites.size()),
+                            Priority::Normal, std::forward<Function>(function), std::forward<Args>(args)...);
+    }
+
+    template<class Function, class... Args>
+    auto submit_after(std::initializer_list<TaskHandle> prerequisites, Priority priority,
+                      Function&& function, Args&&... args)
+        -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit_after(std::span<const TaskHandle>(prerequisites.begin(), prerequisites.size()),
+                            priority, std::forward<Function>(function), std::forward<Args>(args)...);
+    }
+
+    template<class Function, class... Args>
+    auto submit_after(std::span<const TaskHandle> prerequisites, Priority priority,
+                      Function&& function, Args&&... args)
+        -> TaskSubmission<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
         static_cast<void>(detail::priority_index(priority));
         using Result = std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>;
         auto invocation = [callable = std::forward<Function>(function),
@@ -53,8 +103,8 @@ public:
         std::packaged_task<Result()> result_task(std::move(invocation));
         auto result = result_task.get_future();
         Task task([inner = std::move(result_task)]() mutable { inner(); });
-        enqueue(std::move(task), priority);
-        return result;
+        auto handle = admit(std::move(task), priority, prerequisites);
+        return {std::move(result), std::move(handle)};
     }
 
     // Idempotent and safe for concurrent callers outside this scheduler's workers.
@@ -65,7 +115,11 @@ public:
 
 private:
     friend class detail::Worker;
-    void enqueue(Task task, Priority priority);
+    [[nodiscard]] TaskHandle admit(Task task, Priority priority,
+                                   std::span<const TaskHandle> prerequisites);
+    void complete(const std::shared_ptr<detail::DependencyState>& node) noexcept;
+    void publish_ready_locked(detail::DependencyState& node) noexcept;
+    [[nodiscard]] std::optional<Task> take_dependency_ready(Priority priority);
     [[nodiscard]] std::optional<Task> take_task(detail::Worker& worker);
     [[nodiscard]] std::optional<Task> try_take_task(detail::Worker& worker, Priority priority);
     void close_submission();
@@ -77,6 +131,11 @@ private:
     bool accepting_ = true;
     std::uint64_t wake_generation_ = 0;
     std::atomic<std::uint64_t> tasks_submitted_{0};
+    const std::shared_ptr<detail::SchedulerIdentity> identity_;
+    // These nodes own waiting work; intrusive ready links never outlive admission.
+    std::unordered_map<detail::DependencyState*, std::shared_ptr<detail::DependencyState>> active_nodes_;
+    std::array<detail::DependencyState*, detail::priority_count> ready_heads_{};
+    std::array<detail::DependencyState*, detail::priority_count> ready_tails_{};
     // All queues and synchronization state outlive the worker threads.
     std::vector<std::unique_ptr<detail::Worker>> workers_;
     std::mutex shutdown_mutex_;

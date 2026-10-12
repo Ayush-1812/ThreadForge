@@ -4,23 +4,27 @@ ThreadForge is a C++20 multicore task scheduling runtime. The project is built i
 tested increments, with worker-local queues, a global injection queue, and work
 stealing across CPU workers.
 
-## Current milestone: Phase 3
+## Current milestone: Phase 4
 
 - Configurable, fixed worker pool owned through `std::jthread`.
 - Mutex-protected FIFO queue and condition-variable waiting.
 - Per-worker deques: owners take newest work, thieves take oldest work.
 - Worker-local submissions, global fallback, and rotating steal victims.
 - High / Normal / Low priorities with work-conserving 8:4:1 weighted service.
+- Dependency handles, remaining-prerequisite counters, and ready scheduling.
+- Fan-in and fan-out graphs that release tasks without blocking workers.
 - Thread-safe steal, queue-source, and worker-wait counters.
 - Callable submission with arguments, move-only captures, and `std::future` results.
 - Task exceptions delivered through futures without terminating workers.
 - Graceful shutdown that drains accepted tasks and joins every worker.
-- Deterministic priority tests and runnable runtime, stealing, and priority examples.
+- Deterministic priority/dependency tests and runnable scheduling examples.
 - Shutdown race regressions and 100,000-task stress workloads.
 
 The runtime design is described in [docs/architecture.md](docs/architecture.md),
 with API contracts in [docs/scheduler.md](docs/scheduler.md).
 Priority selection and fairness limits are detailed in [docs/priorities.md](docs/priorities.md).
+Dependency contracts and the one-worker diamond example are in
+[docs/dependencies.md](docs/dependencies.md).
 
 ## Build and test
 
@@ -37,6 +41,7 @@ ctest --test-dir build --output-on-failure
 ./build/threadforge_basic
 ./build/threadforge_work_stealing
 ./build/threadforge_priorities
+./build/threadforge_dependency_graph
 ```
 
 GoogleTest is resolved using `find_package(GTest REQUIRED)`; builds do not download
@@ -94,6 +99,23 @@ Nested submissions on the same scheduler are local; external and cross-scheduler
 submissions enter the global queue. The [work-stealing example](examples/work_stealing.cpp)
 returns child futures to its external caller so workers stay available.
 
+For a dependency graph, use `submit_task()` to obtain a future and completion
+handle, then declare prerequisites with `submit_after()`:
+
+```cpp
+auto root = scheduler.submit_task([] { return 6; });
+auto value = root.future.share();
+auto child = scheduler.submit_after({root.handle}, [value] {
+    return value.get() * 2; // The declared prerequisite is already ready.
+});
+int result = child.future.get();
+```
+
+Dependencies wait for completion, including exceptional completion. A dependent
+runs only after every unique prerequisite finishes; it chooses how to handle
+prerequisite exceptions. Handles must belong to this scheduler, and creation-only
+edges prevent cycles through the submission API.
+
 Retrieve a thread-safe telemetry snapshot with `scheduler.metrics()`:
 
 ```cpp
@@ -125,15 +147,17 @@ finishes. Discarding a future does not cancel its task.
 A worker calling `shutdown()` on its own scheduler receives `std::logic_error`.
 Destroy the scheduler from its owning external thread, and do not race object
 destruction against calls to its API. Blocking a worker on another task from the
-same saturated pool can deadlock; dependency scheduling will address this in a
-later phase. Shutdown waits for user tasks to return and cannot interrupt them.
+same saturated pool can deadlock. Declare prerequisite handles with
+`submit_after()` so the scheduler releases ready tasks without occupying a
+waiting worker. Shutdown also drains accepted dependency-blocked tasks and waits
+for user tasks to return; it cannot interrupt them.
 
 ## Roadmap
 
 1. Basic runtime — complete.
 2. **Worker-local queues, work stealing, and steal counters** — complete.
 3. **Priorities and weighted fairness** — complete.
-4. Dependency graph scheduling and task states.
+4. **Dependency graph scheduling** — complete; explicit task-state APIs remain future work.
 5. Metrics and reproducible performance comparisons.
 6. Stress testing, sanitizers, CI, documentation, and examples.
 7. Optional advanced scheduling and optimization.

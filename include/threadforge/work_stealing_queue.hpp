@@ -24,6 +24,8 @@ public:
     [[nodiscard]] std::optional<Task> try_steal(Priority priority);
 
 private:
+    friend class Scheduler;
+    void push_preserving(Task& task, Priority priority);
     [[nodiscard]] std::optional<Task> pop_locked(std::size_t lane, bool steal);
     [[nodiscard]] std::optional<Task> pop_highest_locked(bool steal);
     std::mutex mutex_;

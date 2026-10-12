@@ -20,6 +20,13 @@ public:
     TaskQueue& operator=(const TaskQueue&) = delete;
 
     [[nodiscard]] bool push(Task task, Priority priority = Priority::Normal) {
+        return push_preserving(task, priority);
+    }
+
+private:
+    friend class Scheduler;
+    // Allocate the slot before moving so a failed allocation retains the task.
+    [[nodiscard]] bool push_preserving(Task& task, Priority priority) {
         const auto lane = detail::priority_index(priority);
         if (!task.valid()) {
             throw std::invalid_argument("cannot enqueue an empty task");
@@ -29,12 +36,14 @@ public:
             if (closed_) {
                 return false;
             }
-            tasks_[lane].push_back(std::move(task));
+            tasks_[lane].emplace_back();
+            tasks_[lane].back() = std::move(task);
         }
         available_.notify_one();
         return true;
     }
 
+public:
     [[nodiscard]] std::optional<Task> wait_pop() {
         std::unique_lock lock(mutex_);
         available_.wait(lock, [this] { return closed_ || !empty_locked(); });

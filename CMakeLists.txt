@@ -103,9 +103,24 @@ if(THREADFORGE_BUILD_TESTS)
     threadforge_project_warnings(threadforge_tests)
     gtest_discover_tests(threadforge_tests DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 30)
+
+    # Replacement allocation functions are confined to this executable so
+    # fault injection cannot affect unrelated tests or benchmark runtimes.
+    add_executable(threadforge_allocation_tests tests/allocation_failure_test.cpp)
+    target_link_libraries(threadforge_allocation_tests PRIVATE threadforge::threadforge GTest::gtest_main)
+    threadforge_project_warnings(threadforge_allocation_tests)
+    gtest_discover_tests(threadforge_allocation_tests DISCOVERY_MODE PRE_TEST
+        DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 60 LABELS allocation)
+
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME BenchmarkSummary
+            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_benchmark_summary.py)
+        set_tests_properties(BenchmarkSummary PROPERTIES TIMEOUT 30 LABELS tools)
+    endif()
     if(THREADFORGE_BUILD_STRESS_TESTS)
         add_executable(threadforge_stress_tests tests/stress_test.cpp tests/priority_stress_test.cpp
-            tests/dependency_stress_test.cpp)
+            tests/dependency_stress_test.cpp tests/hardening_stress_test.cpp)
         target_link_libraries(threadforge_stress_tests PRIVATE threadforge::threadforge GTest::gtest_main)
         threadforge_project_warnings(threadforge_stress_tests)
         gtest_discover_tests(threadforge_stress_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ThreadForge VERSION 0.5.0 LANGUAGES CXX)
+project(ThreadForge VERSION 0.6.0 LANGUAGES CXX)
 
 option(THREADFORGE_BUILD_TESTS "Build the GoogleTest test suite" ON)
 option(THREADFORGE_BUILD_EXAMPLES "Build examples" ON)
@@ -8,6 +8,26 @@ option(THREADFORGE_BUILD_BENCHMARKS "Build the optional Google Benchmark suite" 
 option(THREADFORGE_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(THREADFORGE_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
 option(THREADFORGE_ENABLE_TSAN "Enable ThreadSanitizer" OFF)
+option(THREADFORGE_WARNINGS_AS_ERRORS "Treat project warnings as build errors" OFF)
+
+# Keep our warning policy private: embedding ThreadForge must not change the
+# consumer's warning flags. Apply it to tests/examples as well as the library.
+function(threadforge_project_warnings target)
+    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+        if(THREADFORGE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE /WX)
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+        if(THREADFORGE_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE -Werror)
+        endif()
+    elseif(THREADFORGE_WARNINGS_AS_ERRORS)
+        message(FATAL_ERROR "Warnings-as-errors requires GCC, Clang, or MSVC")
+    endif()
+endfunction()
 
 if(THREADFORGE_ENABLE_ASAN AND THREADFORGE_ENABLE_TSAN)
     message(FATAL_ERROR "AddressSanitizer and ThreadSanitizer cannot be combined")
@@ -27,6 +47,20 @@ if(THREADFORGE_ENABLE_ASAN OR THREADFORGE_ENABLE_UBSAN OR THREADFORGE_ENABLE_TSA
         list(APPEND threadforge_sanitizers thread)
     endif()
     list(JOIN threadforge_sanitizers "," threadforge_sanitizer_list)
+    # Check both compilation and runtime linking, rather than accepting an
+    # option that only fails when the real targets are linked later.
+    include(CheckCXXSourceCompiles)
+    include(CMakePushCheckState)
+    cmake_push_check_state(RESET)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=${threadforge_sanitizer_list} -fno-sanitize-recover=all")
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=${threadforge_sanitizer_list}")
+    string(REPLACE "," "_" threadforge_sanitizer_key "${threadforge_sanitizer_list}")
+    set(threadforge_sanitizer_check "THREADFORGE_HAS_SANITIZER_${threadforge_sanitizer_key}")
+    check_cxx_source_compiles("int main() { return 0; }" ${threadforge_sanitizer_check})
+    cmake_pop_check_state()
+    if(NOT ${threadforge_sanitizer_check})
+        message(FATAL_ERROR "Compiler/runtime cannot compile and link ${threadforge_sanitizer_list} sanitizers")
+    endif()
     add_library(threadforge_sanitizer_options INTERFACE)
     target_compile_options(threadforge_sanitizer_options INTERFACE
         -fsanitize=${threadforge_sanitizer_list} -fno-omit-frame-pointer
@@ -47,16 +81,13 @@ target_link_libraries(threadforge PUBLIC Threads::Threads)
 if(TARGET threadforge_sanitizer_options)
     target_link_libraries(threadforge PUBLIC threadforge_sanitizer_options)
 endif()
-if(MSVC)
-    target_compile_options(threadforge PRIVATE /W4 /permissive-)
-else()
-    target_compile_options(threadforge PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+threadforge_project_warnings(threadforge)
 
 if(THREADFORGE_BUILD_EXAMPLES)
     foreach(example IN ITEMS basic work_stealing priorities dependency_graph metrics_report)
         add_executable(threadforge_${example} examples/${example}.cpp)
         target_link_libraries(threadforge_${example} PRIVATE threadforge::threadforge)
+        threadforge_project_warnings(threadforge_${example})
     endforeach()
 endif()
 
@@ -66,14 +97,17 @@ if(THREADFORGE_BUILD_TESTS)
     include(GoogleTest)
     add_executable(threadforge_tests tests/scheduler_test.cpp tests/queue_test.cpp
         tests/stealing_test.cpp tests/priority_test.cpp tests/priority_api_test.cpp
-        tests/dependency_test.cpp tests/metrics_test.cpp tests/centralized_pool_test.cpp)
+        tests/dependency_test.cpp tests/metrics_test.cpp tests/centralized_pool_test.cpp
+        tests/hardening_test.cpp)
     target_link_libraries(threadforge_tests PRIVATE threadforge::threadforge GTest::gtest_main)
+    threadforge_project_warnings(threadforge_tests)
     gtest_discover_tests(threadforge_tests DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 30)
     if(THREADFORGE_BUILD_STRESS_TESTS)
         add_executable(threadforge_stress_tests tests/stress_test.cpp tests/priority_stress_test.cpp
             tests/dependency_stress_test.cpp)
         target_link_libraries(threadforge_stress_tests PRIVATE threadforge::threadforge GTest::gtest_main)
+        threadforge_project_warnings(threadforge_stress_tests)
         gtest_discover_tests(threadforge_stress_tests DISCOVERY_MODE PRE_TEST DISCOVERY_TIMEOUT 30
             PROPERTIES TIMEOUT 120 LABELS stress)
     endif()

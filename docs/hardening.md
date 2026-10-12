@@ -6,11 +6,9 @@ metrics, and allocation failures. Stress workloads validate returned values and
 exactly-once execution at 1, 2, 4, and 8 workers. Deterministic scheduling tests use
 promises and latches to establish ready or blocked work before checking behavior.
 
-The configured GitHub Actions workflow is
-[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Local results and
-environment limitations are recorded separately in [validation.md](validation.md).
-A checked-in workflow does not establish that a hosted run passed; read the
-corresponding GitHub Actions run before reporting its result.
+The GitHub Actions workflow is
+[`.github/workflows/ci.yml`](../.github/workflows/ci.yml). Verified local and hosted
+results and environment limitations are recorded in [validation.md](validation.md).
 
 ## Build warnings and test selection
 
@@ -137,10 +135,10 @@ results, including the workaround used.
 
 ## Scope and remaining limits
 
-Hosted matrix configuration extends checks beyond the locally recorded GCC/WSL
-environment; it does not by itself validate Clang or a GitHub runner. Windows and
-macOS builds have not been validated. The library uses portable C++20, but its
-current automated matrix is Linux-only.
+The successful hosted matrix covers GCC and Clang on Ubuntu, alongside the local
+GCC/WSL checks recorded in [validation.md](validation.md). Windows and macOS builds
+have not been validated. The library uses portable C++20, and its current
+automated matrix runs on Linux.
 
 Passing tests and sanitizers provides evidence for exercised paths rather than
 proof that every concurrency defect is absent. Queues remain mutex-protected,

@@ -67,8 +67,7 @@ Warnings-as-errors is optional outside CI and applies only to project targets;
 consumers do not inherit that warning policy. When Python 3 is available, CTest
 also runs the benchmark-summary regressions. The
 [CI workflow](.github/workflows/ci.yml) configures Ubuntu 24.04 GCC Debug/Release,
-Clang Release, ASan/UBSan, and TSan lanes. Read an actual hosted workflow run
-before reporting its result; local results are in
+Clang Release, ASan/UBSan, and TSan lanes. Recorded local and hosted results are in
 [docs/validation.md](docs/validation.md).
 
 ## Sanitizers

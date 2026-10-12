@@ -193,6 +193,7 @@ settled lifecycle and source totals, and failure counts.
 | Release, after the constructor cleanup fix | 150/150 CTest entries passed in 22.97 seconds |
 | Debug, after the constructor cleanup fix | 150/150 CTest entries passed in 38.79 seconds |
 | AddressSanitizer + UndefinedBehaviorSanitizer, after both fixes | 150/150 CTest entries passed in 76.22 seconds; no findings |
+| ThreadSanitizer, after both fixes | 150/150 CTest entries passed in 181.82 seconds; no race findings |
 
 An earlier Release run passed 150/150 entries in 26.19 seconds. The Debug build
 uses `-DCMAKE_CXX_FLAGS_DEBUG=-g0`. Both configurations enable warnings-as-errors
@@ -211,7 +212,10 @@ allocation remain outside its sweep. Initial hosted ASan failures were confined
 to the allocation-test executable's nothrow allocation/free pairing. Matching
 nothrow replacements now use the fixture's ordinary allocation path; sanitizer
 allocation/deallocation checks remain enabled. The full local ASan/UBSan run
-passed after both corrections. The separate local TSan check is still running.
+passed after both corrections. The full local TSan suite also passed with
+`TSAN_OPTIONS=halt_on_error=1` and the per-process `setarch x86_64 -R` workaround
+described above. Every new 100,000-node stress case finished within its 120-second
+CTest timeout; the longest took 16.39 seconds in that run.
 
 Additional checks verified all nine public headers as standalone translation
 units with strict compiler warnings, all five examples, the CI YAML and eight
@@ -228,5 +232,6 @@ than conclusions drawn from the workflow configuration.
 Host disk constraints require serial builds (`--parallel 1`), Debug and TSan
 without debug symbols (`-g0`), and ASan with `-O1` and no debug symbols. Validation
 logs are retained while generated build directories are removed to recover disk
-space. The sanitizer configuration choices retain instrumentation; the remaining
-Phase 6 sanitizer outcomes will be recorded after those checks finish.
+space. The sanitizer configuration choices retain instrumentation. Final Release
+artifacts and local Debug/sanitizer test logs remain in the ignored build tree;
+generated Debug and sanitizer build directories were removed after validation.

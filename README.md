@@ -33,6 +33,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/threadforge_basic
+./build/threadforge_work_stealing
 ```
 
 GoogleTest is resolved using `find_package(GTest REQUIRED)`; builds do not download
@@ -79,6 +80,24 @@ int total = sum.get();
 scheduler.shutdown();
 ```
 
+Workers consume local work first, then global work, then steal from other workers.
+Nested submissions on the same scheduler are local; external and cross-scheduler
+submissions enter the global queue. The [work-stealing example](examples/work_stealing.cpp)
+returns child futures to its external caller so workers stay available.
+
+Retrieve a thread-safe telemetry snapshot with `scheduler.metrics()`:
+
+```cpp
+scheduler.shutdown();
+auto metrics = scheduler.metrics();
+// Every accepted task is classified once after the workers have joined.
+auto claimed = metrics.local_tasks + metrics.global_tasks + metrics.tasks_stolen;
+```
+
+Snapshots include per-worker counts, failed victim probes, and wait episodes.
+Live snapshots are approximate across counters; call `shutdown()` before relying
+on final totals. Wait counts measure wait entries, not idle time.
+
 The default worker count uses `std::thread::hardware_concurrency()`, falling back
 to one worker. An explicitly configured zero worker count is rejected.
 
@@ -103,7 +122,7 @@ later phase. Shutdown waits for user tasks to return and cannot interrupt them.
 ## Roadmap
 
 1. Basic runtime — complete.
-2. **Worker-local queues, work stealing, and steal counters** — current milestone.
+2. **Worker-local queues, work stealing, and steal counters** — complete.
 3. Priorities, fairness, and queue statistics.
 4. Dependency graph scheduling and task states.
 5. Metrics and reproducible performance comparisons.

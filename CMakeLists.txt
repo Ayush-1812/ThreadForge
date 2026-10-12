@@ -53,8 +53,10 @@ else()
 endif()
 
 if(THREADFORGE_BUILD_EXAMPLES)
-    add_executable(threadforge_basic examples/basic.cpp)
-    target_link_libraries(threadforge_basic PRIVATE threadforge::threadforge)
+    foreach(example IN ITEMS basic work_stealing)
+        add_executable(threadforge_${example} examples/${example}.cpp)
+        target_link_libraries(threadforge_${example} PRIVATE threadforge::threadforge)
+    endforeach()
 endif()
 
 if(THREADFORGE_BUILD_TESTS)

@@ -71,6 +71,30 @@ TEST(WorkStealingQueue, ConcurrentOwnerAndThievesExecuteEachTaskExactlyOnce) {
     }
 }
 
+TEST(WorkStealingQueue, LastTaskHasExactlyOneOwnerUnderContention) {
+    for (int round = 0; round < 50; ++round) {
+        threadforge::WorkStealingQueue queue;
+        std::atomic<int> claimed{0};
+        std::atomic<int> executed{0};
+        queue.push(threadforge::Task([&] { executed.fetch_add(1); }));
+        std::latch start(4);
+        std::vector<std::jthread> consumers;
+        for (int worker = 0; worker < 4; ++worker) {
+            consumers.emplace_back([&, worker] {
+                start.arrive_and_wait();
+                auto task = worker == 0 ? queue.try_pop() : queue.try_steal();
+                if (task) {
+                    claimed.fetch_add(1);
+                    (*task)();
+                }
+            });
+        }
+        consumers.clear();
+        ASSERT_EQ(claimed.load(), 1) << "round " << round;
+        ASSERT_EQ(executed.load(), 1) << "round " << round;
+    }
+}
+
 TEST(WorkStealing, NestedSubmissionsUseOwnerQueueInLifoOrder) {
     threadforge::Scheduler scheduler(1);
     std::vector<int> order;
@@ -87,6 +111,8 @@ TEST(WorkStealing, NestedSubmissionsUseOwnerQueueInLifoOrder) {
     EXPECT_EQ(metrics.local_tasks, 3U);
     EXPECT_EQ(metrics.tasks_stolen, 0U);
     EXPECT_EQ(metrics.failed_steal_attempts, 0U);
+    EXPECT_THROW(scheduler.submit([] {}), std::runtime_error);
+    EXPECT_EQ(scheduler.metrics().tasks_submitted, 4U);
 }
 
 TEST(WorkStealing, LocalQueuePrecedesGlobalFallback) {
@@ -114,6 +140,11 @@ TEST(WorkStealing, LocalQueuePrecedesGlobalFallback) {
 
 TEST(WorkStealing, IdleWorkerStealsWhileOwnerRemainsBusy) {
     threadforge::Scheduler scheduler(2);
+    const auto idle_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (scheduler.metrics().waits < 2 && std::chrono::steady_clock::now() < idle_deadline) {
+        std::this_thread::yield();
+    }
+    EXPECT_GE(scheduler.metrics().waits, 2U);
     std::promise<std::future<std::thread::id>> child_result;
     auto child_available = child_result.get_future();
     std::promise<std::thread::id> owner_id;
@@ -138,6 +169,66 @@ TEST(WorkStealing, IdleWorkerStealsWhileOwnerRemainsBusy) {
     EXPECT_EQ(metrics.global_tasks, 1U);
     EXPECT_EQ(metrics.local_tasks, 0U);
     EXPECT_EQ(metrics.tasks_stolen, 1U);
+}
+
+TEST(WorkStealing, ThiefSubmitsDescendantsToItsOwnLocalQueue) {
+    threadforge::Scheduler scheduler(2);
+    std::promise<std::future<std::future<int>>> child_result;
+    auto child_available = child_result.get_future();
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    auto parent = scheduler.submit([&, gate] {
+        child_result.set_value(scheduler.submit([&] {
+            return scheduler.submit([] { return 47; });
+        }));
+        gate.wait();
+    });
+    auto child = child_available.get();
+    const auto child_status = child.wait_for(std::chrono::seconds(5));
+    std::future<int> grandchild;
+    auto grandchild_status = std::future_status::timeout;
+    if (child_status == std::future_status::ready) {
+        grandchild = child.get();
+        grandchild_status = grandchild.wait_for(std::chrono::seconds(5));
+    }
+    release.set_value();
+    parent.get();
+    scheduler.shutdown();
+    ASSERT_EQ(child_status, std::future_status::ready);
+    ASSERT_EQ(grandchild_status, std::future_status::ready);
+    EXPECT_EQ(grandchild.get(), 47);
+    const auto metrics = scheduler.metrics();
+    EXPECT_EQ(metrics.tasks_submitted, 3U);
+    EXPECT_EQ(metrics.global_tasks, 1U);
+    EXPECT_EQ(metrics.tasks_stolen, 1U);
+    EXPECT_EQ(metrics.local_tasks, 1U);
+}
+
+TEST(WorkStealing, StolenExceptionsPropagateAndThiefRemainsAvailable) {
+    threadforge::Scheduler scheduler(2);
+    std::promise<std::future<int>> child_result;
+    auto child_available = child_result.get_future();
+    std::promise<void> release;
+    auto gate = release.get_future().share();
+    auto parent = scheduler.submit([&, gate] {
+        child_result.set_value(scheduler.submit([]() -> int {
+            throw std::runtime_error("stolen task failed");
+        }));
+        gate.wait();
+    });
+    auto child = child_available.get();
+    const auto child_status = child.wait_for(std::chrono::seconds(5));
+    auto followup = scheduler.submit([] { return 53; });
+    const auto followup_status = followup.wait_for(std::chrono::seconds(5));
+    release.set_value();
+    parent.get();
+    scheduler.shutdown();
+    ASSERT_EQ(child_status, std::future_status::ready);
+    ASSERT_EQ(followup_status, std::future_status::ready);
+    EXPECT_THROW(child.get(), std::runtime_error);
+    EXPECT_EQ(followup.get(), 53);
+    EXPECT_EQ(scheduler.metrics().tasks_stolen, 1U);
+    EXPECT_EQ(scheduler.metrics().global_tasks, 2U);
 }
 
 TEST(WorkStealing, SubmissionFromAnotherSchedulerUsesGlobalQueue) {
@@ -171,6 +262,30 @@ TEST(WorkStealing, WorkersWaitAndWakeForExternalSubmissions) {
         global_tasks += worker.global_tasks;
     }
     EXPECT_EQ(global_tasks, metrics.global_tasks);
+}
+
+TEST(WorkStealing, RepeatedLocalPublicationsWakeParkedWorkers) {
+    threadforge::Scheduler scheduler(2);
+    for (int round = 0; round < 50; ++round) {
+        const auto before = scheduler.metrics().waits;
+        auto parent = scheduler.submit([&, round] {
+            return scheduler.submit([round] { return round * 3; });
+        });
+        ASSERT_EQ(parent.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        auto child = parent.get();
+        ASSERT_EQ(child.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(child.get(), round * 3);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (scheduler.metrics().waits <= before && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        ASSERT_GT(scheduler.metrics().waits, before);
+    }
+    scheduler.shutdown();
+    const auto metrics = scheduler.metrics();
+    EXPECT_EQ(metrics.tasks_submitted, 100U);
+    EXPECT_EQ(metrics.global_tasks, 50U);
+    EXPECT_EQ(metrics.local_tasks + metrics.tasks_stolen, 50U);
 }
 
 TEST(WorkStealing, ShutdownDrainsOwnerQueueAfterClosingAdmission) {

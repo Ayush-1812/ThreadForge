@@ -1,4 +1,4 @@
-# Scheduler API
+# Scheduler API: Phase 2
 
 Include `<threadforge/scheduler.hpp>` and link `threadforge::threadforge`.
 
@@ -33,8 +33,14 @@ auto moved = scheduler.submit(
 
 Keep captured pointers, reference arguments, and reference results valid for their
 required lifetime. Submission is safe from multiple external threads and from
-worker threads while the scheduler accepts work. Nested tasks use the global
-queue in Phase 1. A task submitted during graceful draining is rejected.
+worker threads while the scheduler accepts work. A worker submitting to its own
+scheduler publishes to its local deque; an external thread or a worker belonging
+to a different scheduler publishes to the receiving scheduler's global queue.
+A task submitted during graceful draining is rejected, including nested tasks.
+
+Owners take newer local tasks first. Workers check their local queue, then global
+work, then steal older work from other workers' queues. There is no total FIFO
+ordering or guarantee of fairness under continuous nested submissions.
 
 An allocation failure during submission throws without accepting that task.
 Submission after closure throws `std::runtime_error`. Exceptions thrown by an
@@ -55,4 +61,30 @@ The destructor drains and joins automatically. The owner must destroy the object
 outside its own workers, after other API users have stopped using it. Calling an
 API concurrently with destruction violates the object's lifetime contract.
 
-No immediate shutdown, cancellation, priority, or dependency API exists in Phase 1.
+## Metrics
+
+`metrics()` returns a `MetricsSnapshot`. It is safe concurrently with submission,
+execution, and external shutdown, provided the scheduler object remains alive.
+Its `workers` vector is indexed by stable worker index, with one element per
+configured worker. Reading metrics does not synchronize user task data.
+
+| Field | Meaning |
+| --- | --- |
+| `tasks_submitted` | Tasks successfully published to any scheduler queue |
+| `local_tasks` | Tasks claimed from the executing worker's own deque |
+| `global_tasks` | Tasks claimed from the global injection queue |
+| `tasks_stolen` | Tasks claimed from another worker's deque |
+| `failed_steal_attempts` | Victim deque probes that returned no task |
+| `waits` | Entries into the worker condition-variable wait |
+
+Per-worker fields use the same definitions; steals belong to the executing thief,
+and a worker never counts probing itself. A one-worker scheduler has no steal
+attempts. Claims are counted before invocation, so these counters classify started
+tasks rather than successful completions. Throwing tasks still count as claims.
+
+Individual counters use relaxed atomic reads. Live snapshots can combine different
+instants and are unsuitable for a synchronization or completion barrier. After
+`shutdown()` returns, totals are stable and
+`tasks_submitted == local_tasks + global_tasks + tasks_stolen`.
+
+No immediate shutdown, cancellation, priority, or dependency API exists in Phase 2.

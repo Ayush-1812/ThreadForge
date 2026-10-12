@@ -1,6 +1,6 @@
 # Benchmark plan
 
-No scheduler benchmarks have been measured in Phase 1. Test durations are not
+No scheduler performance benchmarks have been measured yet. Test durations are not
 performance benchmark results, and no throughput or speedup is claimed.
 
 Phase 5 will compare sequential execution, the centralized queue baseline, and

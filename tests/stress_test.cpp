@@ -84,6 +84,77 @@ TEST_P(Stress, SubmissionRacingShutdownDrainsEveryAcceptedTask) {
     }
 }
 
+TEST_P(Stress, LocalFanOutExecutes100000TasksExactlyOnce) {
+    constexpr int task_count = 100000;
+    std::vector<std::atomic<int>> executions(task_count);
+    threadforge::Scheduler scheduler(GetParam());
+    auto parent = scheduler.submit([&] {
+        std::vector<std::future<std::uint64_t>> results;
+        results.reserve(task_count);
+        for (int i = 0; i < task_count; ++i) {
+            const auto id = static_cast<std::uint64_t>(i);
+            results.push_back(scheduler.submit([&, id] {
+                executions[id].fetch_add(1, std::memory_order_relaxed);
+                return id * id;
+            }));
+        }
+        return results;
+    });
+    // The parent returns child futures rather than waiting for them on a worker.
+    auto results = parent.get();
+    scheduler.shutdown();
+    for (int i = 0; i < task_count; ++i) {
+        const auto id = static_cast<std::uint64_t>(i);
+        ASSERT_EQ(results[i].get(), id * id) << "task " << id;
+        ASSERT_EQ(executions[i].load(), 1) << "task " << id;
+    }
+    const auto metrics = scheduler.metrics();
+    EXPECT_EQ(metrics.tasks_submitted, task_count + 1U);
+    EXPECT_EQ(metrics.global_tasks, 1U);
+    EXPECT_EQ(metrics.local_tasks + metrics.tasks_stolen, task_count);
+    std::uint64_t worker_claims = 0;
+    for (const auto& worker : metrics.workers) {
+        worker_claims += worker.local_tasks + worker.global_tasks + worker.tasks_stolen;
+    }
+    EXPECT_EQ(worker_claims, metrics.tasks_submitted);
+}
+
+TEST_P(Stress, LocalSubmissionsRacingShutdownMatchAcceptedWork) {
+    constexpr int attempts = 10000;
+    std::vector<std::atomic<int>> executions(attempts);
+    std::vector<unsigned char> accepted(attempts, 0);
+    std::latch first_submission(1);
+    threadforge::Scheduler scheduler(GetParam());
+    auto parent = scheduler.submit([&] {
+        for (int id = 0; id < attempts; ++id) {
+            try {
+                scheduler.submit([&, id] {
+                    executions[id].fetch_add(1, std::memory_order_relaxed);
+                });
+                accepted[id] = 1;
+            } catch (const std::runtime_error&) {
+                // Closing admission rejects local submissions through the same gate.
+            }
+            if (id == 0) {
+                first_submission.count_down();
+            }
+        }
+    });
+    first_submission.wait();
+    scheduler.shutdown();
+    parent.get();
+    std::uint64_t accepted_count = 1; // The externally submitted parent.
+    for (int id = 0; id < attempts; ++id) {
+        ASSERT_EQ(executions[id].load(), accepted[id]) << "task " << id;
+        accepted_count += accepted[id];
+    }
+    EXPECT_EQ(accepted[0], 1);
+    const auto metrics = scheduler.metrics();
+    EXPECT_EQ(metrics.tasks_submitted, accepted_count);
+    EXPECT_EQ(metrics.global_tasks, 1U);
+    EXPECT_EQ(metrics.local_tasks + metrics.tasks_stolen + metrics.global_tasks, accepted_count);
+}
+
 TEST(StressLifecycle, RepeatedConstructionDestructionDrainsUnevenTasks) {
     for (int round = 0; round < 50; ++round) {
         std::vector<std::future<std::uint64_t>> results;

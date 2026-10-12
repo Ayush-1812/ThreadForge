@@ -63,7 +63,7 @@ void Scheduler::close_submission() {
     work_available_.notify_all();
 }
 
-void Scheduler::enqueue(Task task) {
+void Scheduler::enqueue(Task task, Priority priority) {
     {
         // Admission and queue publication are atomic with respect to closure.
         // Queue consumers never take this lock while holding a queue lock.
@@ -73,8 +73,8 @@ void Scheduler::enqueue(Task task) {
         }
         auto* worker = detail::Worker::current();
         if (worker && &worker->scheduler_ == this) {
-            worker->queue_.push(std::move(task));
-        } else if (!queue_.push(std::move(task))) {
+            worker->queue_.push(std::move(task), priority);
+        } else if (!queue_.push(std::move(task), priority)) {
             throw std::runtime_error("ThreadForge scheduler is shut down");
         }
         tasks_submitted_.fetch_add(1, std::memory_order_relaxed);
@@ -91,29 +91,22 @@ std::optional<Task> Scheduler::take_task(detail::Worker& worker) {
             std::lock_guard lock(state_mutex_);
             observed_generation = wake_generation_;
         }
-        if (auto task = worker.queue_.try_pop()) {
-            worker.metrics_.local_tasks.fetch_add(1, std::memory_order_relaxed);
-            return task;
-        }
-        if (auto task = queue_.try_pop()) {
-            worker.metrics_.global_tasks.fetch_add(1, std::memory_order_relaxed);
-            return task;
-        }
-        const auto count = workers_.size();
-        const auto first_victim = worker.next_victim_ % count;
-        for (std::size_t offset = 0; offset < count; ++offset) {
-            const auto victim = (first_victim + offset) % count;
-            if (victim == worker.index_) {
+        std::array<bool, detail::priority_count> checked{};
+        for (std::size_t offset = 0; offset < detail::priority_cycle.size(); ++offset) {
+            const auto slot = (worker.priority_cursor_ + offset) % detail::priority_cycle.size();
+            const auto priority = detail::priority_cycle[slot];
+            const auto lane = detail::priority_index(priority);
+            if (checked[lane]) {
                 continue;
             }
-            if (auto task = workers_[victim]->queue_.try_steal()) {
-                worker.next_victim_ = (victim + 1) % count;
-                worker.metrics_.tasks_stolen.fetch_add(1, std::memory_order_relaxed);
+            checked[lane] = true;
+            // Class selection precedes source selection: when High is preferred,
+            // local Low cannot mask global or stealable High. Only claims consume slots.
+            if (auto task = try_take_task(worker, priority)) {
+                worker.priority_cursor_ = (slot + 1) % detail::priority_cycle.size();
                 return task;
             }
-            worker.metrics_.failed_steal_attempts.fetch_add(1, std::memory_order_relaxed);
         }
-        worker.next_victim_ = (first_victim + 1) % count;
 
         std::unique_lock lock(state_mutex_);
         // If publication raced any part of the scan, rescan before sleeping or
@@ -129,6 +122,33 @@ std::optional<Task> Scheduler::take_task(detail::Worker& worker) {
             return wake_generation_ != observed_generation || !accepting_;
         });
     }
+}
+
+std::optional<Task> Scheduler::try_take_task(detail::Worker& worker, Priority priority) {
+    if (auto task = worker.queue_.try_pop(priority)) {
+        worker.metrics_.local_tasks.fetch_add(1, std::memory_order_relaxed);
+        return task;
+    }
+    if (auto task = queue_.try_pop(priority)) {
+        worker.metrics_.global_tasks.fetch_add(1, std::memory_order_relaxed);
+        return task;
+    }
+    const auto count = workers_.size();
+    const auto first_victim = worker.next_victim_ % count;
+    for (std::size_t offset = 0; offset < count; ++offset) {
+        const auto victim = (first_victim + offset) % count;
+        if (victim == worker.index_) {
+            continue;
+        }
+        if (auto task = workers_[victim]->queue_.try_steal(priority)) {
+            worker.next_victim_ = (victim + 1) % count;
+            worker.metrics_.tasks_stolen.fetch_add(1, std::memory_order_relaxed);
+            return task;
+        }
+        worker.metrics_.failed_steal_attempts.fetch_add(1, std::memory_order_relaxed);
+    }
+    worker.next_victim_ = (first_victim + 1) % count;
+    return std::nullopt;
 }
 
 MetricsSnapshot Scheduler::metrics() const {

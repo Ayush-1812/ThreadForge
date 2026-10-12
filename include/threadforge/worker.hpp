@@ -28,6 +28,7 @@ private:
     Scheduler& scheduler_;
     const std::size_t index_;
     std::size_t next_victim_;
+    std::size_t priority_cursor_ = 0;
     WorkStealingQueue queue_;
     WorkerMetrics metrics_;
     // A worker's queues and counters must outlive its thread.

@@ -2,6 +2,7 @@
 
 #include "threadforge/config.hpp"
 #include "threadforge/metrics.hpp"
+#include "threadforge/priority.hpp"
 #include "threadforge/task_queue.hpp"
 
 #include <functional>
@@ -34,6 +35,14 @@ public:
     template<class Function, class... Args>
     auto submit(Function&& function, Args&&... args)
         -> std::future<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        return submit(Priority::Normal, std::forward<Function>(function),
+                      std::forward<Args>(args)...);
+    }
+
+    template<class Function, class... Args>
+    auto submit(Priority priority, Function&& function, Args&&... args)
+        -> std::future<std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>> {
+        static_cast<void>(detail::priority_index(priority));
         using Result = std::invoke_result_t<std::decay_t<Function>, std::decay_t<Args>...>;
         auto invocation = [callable = std::forward<Function>(function),
                            arguments = std::make_tuple(std::forward<Args>(args)...)]() mutable -> Result {
@@ -44,7 +53,7 @@ public:
         std::packaged_task<Result()> result_task(std::move(invocation));
         auto result = result_task.get_future();
         Task task([inner = std::move(result_task)]() mutable { inner(); });
-        enqueue(std::move(task));
+        enqueue(std::move(task), priority);
         return result;
     }
 
@@ -56,8 +65,9 @@ public:
 
 private:
     friend class detail::Worker;
-    void enqueue(Task task);
+    void enqueue(Task task, Priority priority);
     [[nodiscard]] std::optional<Task> take_task(detail::Worker& worker);
+    [[nodiscard]] std::optional<Task> try_take_task(detail::Worker& worker, Priority priority);
     void close_submission();
 
     Config config_;

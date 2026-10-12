@@ -4,12 +4,13 @@ ThreadForge is a C++20 multicore task scheduling runtime. The project is built i
 tested increments, with worker-local queues, a global injection queue, and work
 stealing across CPU workers.
 
-## Current milestone: Phase 2
+## Current milestone: Phase 3
 
 - Configurable, fixed worker pool owned through `std::jthread`.
 - Mutex-protected FIFO queue and condition-variable waiting.
 - Per-worker deques: owners take newest work, thieves take oldest work.
 - Worker-local submissions, global fallback, and rotating steal victims.
+- High / Normal / Low priorities with work-conserving 8:4:1 weighted service.
 - Thread-safe steal, queue-source, and worker-wait counters.
 - Callable submission with arguments, move-only captures, and `std::future` results.
 - Task exceptions delivered through futures without terminating workers.
@@ -19,6 +20,7 @@ stealing across CPU workers.
 
 The runtime design is described in [docs/architecture.md](docs/architecture.md),
 with API contracts in [docs/scheduler.md](docs/scheduler.md).
+Priority selection and fairness limits are detailed in [docs/priorities.md](docs/priorities.md).
 
 ## Build and test
 
@@ -34,6 +36,7 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ./build/threadforge_basic
 ./build/threadforge_work_stealing
+./build/threadforge_priorities
 ```
 
 GoogleTest is resolved using `find_package(GTest REQUIRED)`; builds do not download
@@ -80,7 +83,13 @@ int total = sum.get();
 scheduler.shutdown();
 ```
 
-Workers consume local work first, then global work, then steal from other workers.
+Use `scheduler.submit(threadforge::Priority::High, callable, args...)` to select
+a priority; the existing overload defaults to `Normal`. Priorities are explicit
+and are not inherited by nested submissions.
+
+Within the preferred priority, workers consume local work first, then global work,
+then steal from other workers. Each worker cycles through eight High, four Normal,
+and one Low claim, skipping empty classes. Running tasks are never preempted.
 Nested submissions on the same scheduler are local; external and cross-scheduler
 submissions enter the global queue. The [work-stealing example](examples/work_stealing.cpp)
 returns child futures to its external caller so workers stay available.
@@ -123,7 +132,7 @@ later phase. Shutdown waits for user tasks to return and cannot interrupt them.
 
 1. Basic runtime — complete.
 2. **Worker-local queues, work stealing, and steal counters** — complete.
-3. Priorities, fairness, and queue statistics.
+3. **Priorities and weighted fairness** — current milestone.
 4. Dependency graph scheduling and task states.
 5. Metrics and reproducible performance comparisons.
 6. Stress testing, sanitizers, CI, documentation, and examples.

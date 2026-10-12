@@ -70,6 +70,24 @@ THREADFORGE_TEST_NOINLINE void* operator new[](std::size_t size) {
     return allocation_injection::allocate(size);
 }
 
+// Prebuilt GoogleTest also uses nothrow allocation. Keep it on the same
+// malloc/free path so sanitizer allocation/deallocation families remain paired.
+THREADFORGE_TEST_NOINLINE void* operator new(std::size_t size, const std::nothrow_t&) noexcept {
+    try {
+        return allocation_injection::allocate(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+THREADFORGE_TEST_NOINLINE void* operator new[](std::size_t size, const std::nothrow_t&) noexcept {
+    try {
+        return allocation_injection::allocate(size);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 THREADFORGE_TEST_NOINLINE void operator delete(void* storage) noexcept {
     std::free(storage);
 }
@@ -83,6 +101,14 @@ THREADFORGE_TEST_NOINLINE void operator delete(void* storage, std::size_t) noexc
 }
 
 THREADFORGE_TEST_NOINLINE void operator delete[](void* storage, std::size_t) noexcept {
+    std::free(storage);
+}
+
+THREADFORGE_TEST_NOINLINE void operator delete(void* storage, const std::nothrow_t&) noexcept {
+    std::free(storage);
+}
+
+THREADFORGE_TEST_NOINLINE void operator delete[](void* storage, const std::nothrow_t&) noexcept {
     std::free(storage);
 }
 

@@ -117,6 +117,9 @@ limits very short intervals.
 
 For a stable final snapshot with timing enabled and completed work, an average
 execution interval can be calculated as `total_execution_ns / tasks_completed`.
+Average ready queue wait is `total_queue_wait_ns / tasks_started`. The report
+prints both averages in integer nanoseconds, rounding down, or zero when the
+denominator is zero.
 Maximum intervals identify outliers; averages alone do not describe a latency
 distribution. No percentile histogram is collected.
 

@@ -23,8 +23,9 @@ cmake --build build-bench --target threadforge_benchmarks
 ./build-bench/benchmarks/threadforge_benchmarks \
   --benchmark_min_time=0.2 --benchmark_repetitions=5 \
   --benchmark_report_aggregates_only=true \
-  --benchmark_out=benchmark-results.json --benchmark_out_format=json
-python3 scripts/summarize_benchmarks.py benchmark-results.json > benchmark-summary.md
+  --benchmark_out=benchmark-results.raw.json --benchmark_out_format=json
+python3 scripts/summarize_benchmarks.py benchmark-results.raw.json \
+  --normalized-json benchmark-results.json > benchmark-summary.md
 ```
 
 List registered cases with `--benchmark_list_tests=true`. Filter the cases when
@@ -55,8 +56,10 @@ remaining arguments are passed to Google Benchmark. The default
 `benchmark-results/` directory is ignored by Git. Set
 `THREADFORGE_BENCHMARK_BUILD_DIR` to choose the build directory and
 `THREADFORGE_BUILD_JOBS` to change the default one build job. The output contains
-`environment.txt`, `results.json`, and `summary.md`; Python 3 is required for the
-summary step.
+`environment.txt`, `results.raw.json`, portable `results.json`, and `summary.md`;
+Python 3 is required for the summary step. The raw file is retained unchanged.
+Normalization replaces undefined nonfinite constants with `null`; recognized
+batch timings must be positive and finite before a portable report is written.
 
 The summary script prints batch wall times in microseconds, preferring the
 median when repetition aggregates are present, and speedups against the matching
@@ -160,5 +163,63 @@ benchmark workloads in this first suite. The fixed 1,024-task batch and syntheti
 integer kernel also limit conclusions about larger graphs or application-specific
 memory access patterns.
 
-Measured results should be added only after actual runs, with their environment
-and uncertainty. No performance measurements are fabricated in this document.
+## Measured WSL sample: 2026-10-12
+
+All 54 cases completed with valid checksums. This is a short sample for verifying
+the benchmark suite and illustrating the reports, rather than a stable ranking.
+The [complete median table](benchmark-results/phase5-wsl.md) and
+[measurement data](benchmark-results/phase5-wsl.json) retain the results.
+
+| Environment | Value |
+| --- | --- |
+| CPU | Intel Core i5-1155G7, 4 physical cores / 8 logical CPUs visible to WSL |
+| OS | Ubuntu 24.04 under WSL2 on Windows |
+| Compiler / build | GCC 13.3.0; CMake 3.28.3; Release `-O3 -DNDEBUG`, C++20 |
+| Benchmark package | Ubuntu Google Benchmark 1.8.3 |
+| Runtime timing | Disabled; counters enabled |
+| Sampling | 0.01-second warmup, 0.05-second minimum time, 3 repetitions per case |
+| Placement | No explicit CPU affinity; shared host |
+
+The packaged benchmark library reports `library_build_type: debug` and prints
+`Library was built as DEBUG. Timings may be affected.` The ThreadForge executable
+and library were built in Release. No CPU-work compilation ran concurrently with
+the sample. The library warning, short intervals, and host variability limit
+performance conclusions.
+
+The following batch medians cover 1,024 leaves at 16,384 base kernel rounds.
+Uneven work uses sixteen times that amount for every sixteenth leaf. Times are
+milliseconds; sequential execution computes the same payload directly.
+
+| Workload | Workers | Centralized pool (ms) | ThreadForge (ms) |
+| --- | ---: | ---: | ---: |
+| Uniform; sequential 35.941 ms | 1 | 46.195 | 50.226 |
+| Uniform | 2 | 20.558 | 24.189 |
+| Uniform | 4 | 10.955 | 10.715 |
+| Uniform | 8 | 6.311 | 9.139 |
+| Uneven; sequential 70.276 ms | 1 | 109.742 | 86.751 |
+| Uneven | 2 | 37.211 | 51.886 |
+| Uneven | 4 | 20.002 | 19.645 |
+| Uneven | 8 | 14.824 | 28.692 |
+
+Larger payloads benefited from multiple workers in this sample. Tiny and medium
+payloads were dominated by submission, synchronization, and scheduling costs;
+some cases varied substantially across repetitions. Eight workers did not
+consistently improve ThreadForge's time over four workers. These observations
+do not establish a general advantage for either pool or predict application
+performance. Longer runs on a controlled host are needed before optimization
+decisions or performance claims.
+
+The sample command was:
+
+```sh
+./build-release/benchmarks/threadforge_benchmarks \
+  --benchmark_min_warmup_time=0.01 --benchmark_min_time=0.05s \
+  --benchmark_repetitions=3 --benchmark_report_aggregates_only=true \
+  --benchmark_out=phase5-wsl.raw.json --benchmark_out_format=json
+```
+
+The published JSON omits the host identifier and represents undefined
+coefficient-of-variation values for zero counters as `null`; measured finite
+values are unchanged. Google Benchmark 1.8.3 emits nonstandard `NaN` tokens for
+those undefined values. The summary ignores coefficient-of-variation entries
+and uses each case's measured median batch time.

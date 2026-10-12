@@ -31,7 +31,8 @@ cmake --build "$build_dir" --target threadforge_benchmarks \
 "$build_dir/benchmarks/threadforge_benchmarks" \
     --benchmark_min_warmup_time=0.1 --benchmark_min_time=0.2s \
     --benchmark_repetitions=5 "$@" \
-    --benchmark_out="$output_dir/results.json" --benchmark_out_format=json
-python3 "$script_root/summarize_benchmarks.py" "$output_dir/results.json" \
+    --benchmark_out="$output_dir/results.raw.json" --benchmark_out_format=json
+python3 "$script_root/summarize_benchmarks.py" "$output_dir/results.raw.json" \
+    --normalized-json "$output_dir/results.json" \
     > "$output_dir/summary.md"
 printf 'Reports written to %s\n' "$output_dir"

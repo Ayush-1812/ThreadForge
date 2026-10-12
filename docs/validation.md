@@ -4,7 +4,7 @@ Validation is performed on Ubuntu 24.04 under WSL2, using GCC 13.3.0, CMake 3.28
 Ninja, and GoogleTest 1.14.0. The core library uses portable C++20; other compilers
 and operating systems have not yet been validated.
 
-The suite contains 107 GoogleTest cases: 74 focused runtime, queue, work-stealing,
+The Phase 4 suite contained 107 GoogleTest cases: 74 focused runtime, queue, work-stealing,
 priority, and dependency tests, plus 33 stress cases. The basic example prints `Answer: 42`
 and `Sum: 30`.
 
@@ -124,6 +124,19 @@ and zero final pending/ready/running/dependency gauges. All 54 Google Benchmark
 cases completed with three repetitions and validated their checksums. The short
 sample is described in [benchmarks.md](benchmarks.md); it is separate from test
 execution times.
+
+The full ThreadSanitizer build also passed 124/124 tests with no race findings.
+It uses unoptimized Debug code with `-DCMAKE_CXX_FLAGS_DEBUG=-g0`, one build job,
+and the per-process WSL address-layout workaround below. This includes live
+snapshots from concurrent producers and the optional timing paths.
+
+The benchmark runner was exercised end to end with a filtered sequential case,
+verifying the optimized build, flag overrides, environment output, raw JSON,
+normalized JSON, and Markdown summary. Additional small fixtures checked median
+selection, unit conversion, tiny speedup ratios, undefined counter normalization,
+and rejection of erroneous/nonfinite timing reports. The published sample was
+checked for 54 matching median cases, cross-implementation checksum equality,
+ThreadForge submission/completion/source totals, and strict JSON syntax.
 
 ## WSL ThreadSanitizer startup
 

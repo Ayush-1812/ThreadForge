@@ -48,8 +48,12 @@ void write_metrics(std::ostream& output, const MetricsSnapshot& metrics) {
     if (metrics.timing_enabled) {
         output << "Timing (ns): execution_total=" << metrics.total_execution_ns
                << " execution_max=" << metrics.max_execution_ns
+               << " execution_average=" << (metrics.tasks_completed == 0 ? 0 :
+                   metrics.total_execution_ns / metrics.tasks_completed)
                << " queue_total=" << metrics.total_queue_wait_ns
                << " queue_max=" << metrics.max_queue_wait_ns
+               << " queue_average=" << (metrics.tasks_started == 0 ? 0 :
+                   metrics.total_queue_wait_ns / metrics.tasks_started)
                << " dependency_total=" << metrics.total_dependency_wait_ns
                << " idle_total=" << metrics.total_idle_wait_ns << '\n';
     } else {
@@ -65,8 +69,12 @@ void write_metrics(std::ostream& output, const MetricsSnapshot& metrics) {
         if (metrics.timing_enabled) {
             output << " execution_ns=" << worker.total_execution_ns
                    << " execution_max_ns=" << worker.max_execution_ns
+                   << " execution_average_ns=" << (worker.tasks_completed == 0 ? 0 :
+                       worker.total_execution_ns / worker.tasks_completed)
                    << " queue_ns=" << worker.total_queue_wait_ns
                    << " queue_max_ns=" << worker.max_queue_wait_ns
+                   << " queue_average_ns=" << (worker.tasks_started == 0 ? 0 :
+                       worker.total_queue_wait_ns / worker.tasks_started)
                    << " idle_ns=" << worker.total_idle_wait_ns;
         }
         output << " priority_H/N/L=" << worker.tasks_by_priority[0] << '/'

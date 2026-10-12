@@ -132,7 +132,7 @@ later phase. Shutdown waits for user tasks to return and cannot interrupt them.
 
 1. Basic runtime — complete.
 2. **Worker-local queues, work stealing, and steal counters** — complete.
-3. **Priorities and weighted fairness** — current milestone.
+3. **Priorities and weighted fairness** — complete.
 4. Dependency graph scheduling and task states.
 5. Metrics and reproducible performance comparisons.
 6. Stress testing, sanitizers, CI, documentation, and examples.

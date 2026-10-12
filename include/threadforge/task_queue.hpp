@@ -43,6 +43,16 @@ public:
         return task;
     }
 
+    [[nodiscard]] std::optional<Task> try_pop() {
+        std::lock_guard lock(mutex_);
+        if (tasks_.empty()) {
+            return std::nullopt;
+        }
+        auto task = std::move(tasks_.front());
+        tasks_.pop_front();
+        return task;
+    }
+
     void close() {
         {
             std::lock_guard lock(mutex_);

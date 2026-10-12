@@ -1,19 +1,23 @@
 #include "threadforge/worker.hpp"
-#include "threadforge/task_queue.hpp"
+#include "threadforge/scheduler.hpp"
 
 namespace threadforge::detail {
 
-thread_local const TaskQueue* Worker::current_queue_ = nullptr;
+thread_local Worker* Worker::current_worker_ = nullptr;
 
-Worker::Worker(TaskQueue& queue)
-    : thread_([&queue] {
-        current_queue_ = &queue;
-        while (auto task = queue.wait_pop()) {
+Worker::Worker(Scheduler& scheduler, std::size_t index)
+    : scheduler_(scheduler), index_(index), next_victim_(index + 1) {}
+
+void Worker::start() {
+    thread_ = std::jthread([this] {
+        current_worker_ = this;
+        while (auto task = scheduler_.take_task(*this)) {
             // packaged_task captures callable exceptions in its associated future.
             (*task)();
         }
-        current_queue_ = nullptr;
-    }) {}
+        current_worker_ = nullptr;
+    });
+}
 
 void Worker::join() {
     if (thread_.joinable()) {
@@ -21,8 +25,8 @@ void Worker::join() {
     }
 }
 
-bool Worker::is_current_worker(const TaskQueue& queue) noexcept {
-    return current_queue_ == &queue;
+Worker* Worker::current() noexcept {
+    return current_worker_;
 }
 
 } // namespace threadforge::detail

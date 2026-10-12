@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ThreadForge VERSION 0.1.0 LANGUAGES CXX)
+project(ThreadForge VERSION 0.2.0 LANGUAGES CXX)
 
 option(THREADFORGE_BUILD_TESTS "Build the GoogleTest test suite" ON)
 option(THREADFORGE_BUILD_EXAMPLES "Build examples" ON)
@@ -36,7 +36,7 @@ endif()
 
 find_package(Threads REQUIRED)
 
-add_library(threadforge src/scheduler.cpp src/worker.cpp)
+add_library(threadforge src/scheduler.cpp src/worker.cpp src/work_stealing_queue.cpp src/metrics.cpp)
 add_library(threadforge::threadforge ALIAS threadforge)
 target_compile_features(threadforge PUBLIC cxx_std_20)
 set_target_properties(threadforge PROPERTIES CXX_EXTENSIONS OFF)
@@ -61,7 +61,7 @@ if(THREADFORGE_BUILD_TESTS)
     enable_testing()
     find_package(GTest REQUIRED)
     include(GoogleTest)
-    add_executable(threadforge_tests tests/scheduler_test.cpp tests/queue_test.cpp)
+    add_executable(threadforge_tests tests/scheduler_test.cpp tests/queue_test.cpp tests/stealing_test.cpp)
     target_link_libraries(threadforge_tests PRIVATE threadforge::threadforge GTest::gtest_main)
     gtest_discover_tests(threadforge_tests DISCOVERY_MODE PRE_TEST
         DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 30)

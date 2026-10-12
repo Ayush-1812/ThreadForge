@@ -1,13 +1,16 @@
 # ThreadForge
 
 ThreadForge is a C++20 multicore task scheduling runtime. The project is built in
-tested increments, starting with a centralized queue before adding worker-local
-queues and work stealing.
+tested increments, with worker-local queues, a global injection queue, and work
+stealing across CPU workers.
 
-## Current milestone: Phase 1
+## Current milestone: Phase 2
 
 - Configurable, fixed worker pool owned through `std::jthread`.
 - Mutex-protected FIFO queue and condition-variable waiting.
+- Per-worker deques: owners take newest work, thieves take oldest work.
+- Worker-local submissions, global fallback, and rotating steal victims.
+- Thread-safe steal, queue-source, and worker-wait counters.
 - Callable submission with arguments, move-only captures, and `std::future` results.
 - Task exceptions delivered through futures without terminating workers.
 - Graceful shutdown that drains accepted tasks and joins every worker.
@@ -99,13 +102,13 @@ later phase. Shutdown waits for user tasks to return and cannot interrupt them.
 
 ## Roadmap
 
-1. **Basic runtime** — current milestone.
-2. Worker-local queues, work stealing, and steal counters.
+1. Basic runtime — complete.
+2. **Worker-local queues, work stealing, and steal counters** — current milestone.
 3. Priorities, fairness, and queue statistics.
 4. Dependency graph scheduling and task states.
 5. Metrics and reproducible performance comparisons.
 6. Stress testing, sanitizers, CI, documentation, and examples.
 7. Optional advanced scheduling and optimization.
 
-The centralized queue is a deliberate correctness baseline. Performance results
-will be published only after measurement; no performance claim is made yet.
+Queues remain mutex-protected. Performance results will be published only after
+measurement; no performance claim is made yet.

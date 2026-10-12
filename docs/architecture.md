@@ -203,8 +203,9 @@ or shutdown of multiple schedulers remain the application's responsibility.
 
 Phase 6 adds shutdown and allocation-failure regressions, optional Python report
 validation tests, private warnings-as-errors for project targets, sanitizer
-support checks, and a Linux CI matrix. These checks exercise the existing runtime
-contracts rather than adding cancellation or changing scheduling policy. The
+support checks, and a Linux CI matrix. Constructor failure closes admission and
+joins every started worker before destroying the shared queue registry. The tests
+exercise task lifetime, error cleanup, and existing scheduling contracts. The
 configured workflow and local commands are described in
 [Testing and hardening](hardening.md); actual local results and environment limits
 remain in [Validation](validation.md).

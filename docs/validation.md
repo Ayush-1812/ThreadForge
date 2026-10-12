@@ -170,3 +170,63 @@ This disables address randomization only for that command and its children.
 No global kernel setting was changed. On other Linux environments, try the
 ordinary CTest command first; containers may disallow changing the process
 personality. The workaround is environment-specific rather than a library fix.
+
+## Phase 6 validation
+
+Phase 6 adds 25 C++ cases: ten focused hardening cases, twelve stress cases, and
+three allocation-failure cases in an isolated executable. The resulting suite
+contains 149 C++ cases: 104 focused cases, including the three isolated allocation
+cases, and 45 stress cases. One additional CTest entry runs thirteen Python unit
+cases for the benchmark summary helper, giving 150 CTest entries in total.
+
+Focused hardening covers submission exceptions, exceptional result storage,
+move-only ownership, and capture destruction that reenters scheduler APIs.
+The new stress workloads run at 1, 2, 4, and 8 workers. They check 100,000-node
+mixed-priority dependency graphs with bounded layers, failed prerequisites and
+discarded handles/futures, irregular nested fan-out whose workers return futures,
+and repeated graceful drain with concurrent submitters, shutdown callers, and
+timed metrics snapshots. Checks include every node's execution count, checksums,
+settled lifecycle and source totals, and failure counts.
+
+| Phase 6 configuration | Verified result |
+| --- | --- |
+| Release, after the constructor cleanup fix | 150/150 CTest entries passed in 22.97 seconds |
+| Debug, after the constructor cleanup fix | 150/150 CTest entries passed in 38.79 seconds |
+| AddressSanitizer + UndefinedBehaviorSanitizer, after both fixes | 150/150 CTest entries passed in 76.22 seconds; no findings |
+
+An earlier Release run passed 150/150 entries in 26.19 seconds. The Debug build
+uses `-DCMAKE_CXX_FLAGS_DEBUG=-g0`. Both configurations enable warnings-as-errors
+for all project-owned targets. The three isolated allocation cases also passed
+twenty repetitions each, for sixty successful case executions.
+
+Allocation injection exposed a constructor-failure lifetime race: sequential
+worker destruction could destroy a queue while another started worker still
+scanned the shared steal registry. The constructor cleanup now closes admission
+and joins every started worker before member unwinding destroys any registry
+entry. The initial hosted ThreadSanitizer run independently reported this race.
+
+The isolated injector replaces ordinary and nothrow `new`/`new[]` on the injecting
+thread. Over-aligned allocation, direct `malloc`, and operating-system thread
+allocation remain outside its sweep. Initial hosted ASan failures were confined
+to the allocation-test executable's nothrow allocation/free pairing. Matching
+nothrow replacements now use the fixture's ordinary allocation path; sanitizer
+allocation/deallocation checks remain enabled. The full local ASan/UBSan run
+passed after both corrections. The separate local TSan check is still running.
+
+Additional checks verified all nine public headers as standalone translation
+units with strict compiler warnings, all five examples, the CI YAML and eight
+shell blocks, rejection of simultaneous ASan and TSan configuration, and an
+eighteen-case benchmark smoke report with checked results. The initial GitHub
+Actions run exposed the sanitizer findings described above. After both fixes,
+[run 38279890399](https://github.com/Ayush-1812/ThreadForge/actions/runs/38279890399)
+passed all five lanes on commit `f311259`: GCC 13 Debug, GCC 13 Release, Clang 18
+Release, GCC 13 ASan/UBSan, and GCC 13 TSan. Every lane enables warnings-as-errors
+and runs the complete CTest suite; the GCC Release lane also passed the checksum
+benchmark smoke and report validation. These are verified hosted results rather
+than conclusions drawn from the workflow configuration.
+
+Host disk constraints require serial builds (`--parallel 1`), Debug and TSan
+without debug symbols (`-g0`), and ASan with `-O1` and no debug symbols. Validation
+logs are retained while generated build directories are removed to recover disk
+space. The sanitizer configuration choices retain instrumentation; the remaining
+Phase 6 sanitizer outcomes will be recorded after those checks finish.

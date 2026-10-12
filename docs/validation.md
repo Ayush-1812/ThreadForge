@@ -130,6 +130,24 @@ It uses unoptimized Debug code with `-DCMAKE_CXX_FLAGS_DEBUG=-g0`, one build job
 and the per-process WSL address-layout workaround below. This includes live
 snapshots from concurrent producers and the optional timing paths.
 
+AddressSanitizer plus UndefinedBehaviorSanitizer passed all 124 tests with no
+findings. That Debug configuration uses `-DCMAKE_CXX_FLAGS_DEBUG=-O1` and one
+build job to limit disk use; instrumentation remains enabled for the runtime,
+examples, and tests. Its metrics example also returned the expected checksum,
+1,025 completions, and zero final work gauges. The final Release build was
+relinked after the report-average additions and repeated all 124 tests; all five
+examples completed with their expected outputs.
+
+| Phase 5 configuration | Result |
+| --- | --- |
+| Release | 124/124 tests passed; five examples verified |
+| ThreadSanitizer | 124/124 tests passed; no race findings |
+| AddressSanitizer + UndefinedBehaviorSanitizer | 124/124 tests passed; no findings |
+
+After validation, generated sanitizer build directories were removed to recover
+space on the host disk. The Release build and local sanitizer CTest logs were
+retained; no tracked source files were removed.
+
 The benchmark runner was exercised end to end with a filtered sequential case,
 verifying the optimized build, flag overrides, environment output, raw JSON,
 normalized JSON, and Markdown summary. Additional small fixtures checked median

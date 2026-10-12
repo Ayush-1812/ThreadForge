@@ -14,7 +14,9 @@ output_dir=$(cd -- "$output_dir" && pwd)
 
 cmake -S "$project_root" -B "$build_dir" -DCMAKE_BUILD_TYPE=Release \
     -DTHREADFORGE_BUILD_TESTS=OFF -DTHREADFORGE_BUILD_EXAMPLES=OFF \
-    -DTHREADFORGE_BUILD_BENCHMARKS=ON
+    -DTHREADFORGE_BUILD_BENCHMARKS=ON \
+    -DTHREADFORGE_ENABLE_ASAN=OFF -DTHREADFORGE_ENABLE_UBSAN=OFF \
+    -DTHREADFORGE_ENABLE_TSAN=OFF
 cmake --build "$build_dir" --target threadforge_benchmarks \
     -j "${THREADFORGE_BUILD_JOBS:-1}"
 
@@ -23,6 +25,11 @@ cmake --build "$build_dir" --target threadforge_benchmarks \
     uname -srmo
     "${CXX:-c++}" --version
     cmake --version
+    sed -n '/^CMAKE_CXX_COMPILER:FILEPATH=/p; /^CMAKE_CXX_FLAGS:STRING=/p; /^CMAKE_CXX_FLAGS_RELEASE:STRING=/p; /^THREADFORGE_ENABLE_.*:BOOL=/p' \
+        "$build_dir/CMakeCache.txt"
+    printf 'Default sampling: warmup=0.1s minimum=0.2s repetitions=5\nAdditional arguments:'
+    printf ' %q' "$@"
+    printf '\n'
     if command -v lscpu >/dev/null 2>&1; then
         lscpu | sed -n '/^Architecture:/p; /^CPU(s):/p; /^Model name:/p; /^Thread(s) per core:/p; /^Core(s) per socket:/p'
     fi

@@ -60,6 +60,8 @@ remaining arguments are passed to Google Benchmark. The default
 Python 3 is required for the summary step. The raw file is retained unchanged.
 Normalization replaces undefined nonfinite constants with `null`; recognized
 batch timings must be positive and finite before a portable report is written.
+The runner disables CMake sanitizer options and records effective compiler flags
+and supplied benchmark arguments in the environment file.
 
 The summary script prints batch wall times in microseconds, preferring the
 median when repetition aggregates are present, and speedups against the matching

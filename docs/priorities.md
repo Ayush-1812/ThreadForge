@@ -1,4 +1,4 @@
-# Priority scheduling: Phase 3
+# Priority scheduling: Phase 4
 
 ThreadForge supports `threadforge::Priority::High`, `Normal`, and `Low`. Include
 `<threadforge/scheduler.hpp>` and pass the priority before the callable:
@@ -17,13 +17,22 @@ throw `std::invalid_argument` without accepting the task. Callable arguments,
 futures, exception propagation, and graceful shutdown retain their existing
 contracts.
 
+`submit_task(Priority, callable, args...)` accepts the same classes and returns a
+future plus a completion handle. For dependency submissions the explicit form is
+`submit_after(dependencies, Priority, callable, args...)`. Their omitted
+priorities also default to Normal. A waiting dependent is not eligible for
+priority selection until its prerequisites complete; priority does not bypass
+dependencies. See [Dependency scheduling](dependencies.md).
+
 ## Queue selection
 
 The global queue and every worker-local queue each have three priority lanes.
 Within a lane, the global queue is FIFO, the owner takes its newest local task
 first, and thieves take the oldest task from a victim. External submissions use
-the global queue; submissions from a worker of this scheduler use its local
-queue.
+the global injection queue; ready submissions from a worker of this scheduler
+normally use its local queue. Dependency completion publishes newly ready tasks
+to separate intrusive priority lists. Ready admission also uses these lists as
+an allocation-free fallback if an ordinary deque cannot grow.
 
 For direct queue users, no-argument `try_pop()`, `try_steal()`, and global
 `wait_pop()` select the highest available lane strictly. The overloads taking a
@@ -31,7 +40,9 @@ For direct queue users, no-argument `try_pop()`, `try_steal()`, and global
 which uses the lane-specific methods; direct queue helpers do not provide fairness.
 
 A worker first chooses which priority class to try. For that class it checks its
-local lane, then the global lane, then every other worker's lane. Only after
+local lane, the global injection lane, the intrusive ready list, then every
+other worker's lane. The injection lane and intrusive list are individually
+FIFO, with no FIFO ordering spanning the two sources. Only after
 failing to claim any task of that class does it try the next class. Therefore,
 when `High` is the current preferred class, a global or stolen `High` task takes
 precedence over a local `Low` task. Source preference applies within each class.
@@ -79,14 +90,17 @@ a worker services `Normal` and `Low` slots even while `High` tasks are queued.
 This gives lower classes opportunities under a sustained higher-class load.
 Conversely, priority does not guarantee fairness to every individual task. Local
 LIFO selection can postpone an old local task indefinitely, and continuous local
-work can postpone global or victim work of the same class. Global FIFO orders
-tasks within a lane but does not overcome local-source preference. No aging or
-deadline scheduling is implemented.
+work can postpone global or victim work of the same class. Continuous injection
+work can also postpone intrusive-ready tasks of that class. FIFO orders tasks
+within each global source and lane but does not overcome earlier-source
+preference. No aging or deadline scheduling is implemented.
 
 Blocking on a child future from a scheduler worker can still deadlock if all
 workers wait for queued work. Priorities do not add cooperative future waiting.
 Return child futures to an external caller, or otherwise keep workers available
-to execute them.
+to execute them. Declared handle dependencies let the scheduler release children
+without waiting on futures; a dependent can read its declared prerequisites'
+already-ready results. Arbitrary waits still have the same deadlock risk.
 
 ## Deterministic example and metrics
 
@@ -97,7 +111,8 @@ claimed in `High`, `Normal`, `Low` order. The gate is released before waiting on
 futures or calling shutdown. No timing assumptions or sleeps are needed.
 
 Priority lanes retain Phase 2 metrics: each claimed task counts as local, global,
-or stolen, regardless of its priority. `failed_steal_attempts` counts unsuccessful
+or stolen, regardless of its priority. Intrusive ready-list claims count as global
+work. `failed_steal_attempts` counts unsuccessful
 victim-priority-lane probes; an empty victim can account for three failed probes
 in a full scan. Live metrics remain observational snapshots, and no counter
 provides a per-priority completion barrier.

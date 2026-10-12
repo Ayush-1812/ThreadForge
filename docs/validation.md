@@ -1,11 +1,11 @@
-# Phase 3 validation
+# Phase 4 validation
 
 Validation is performed on Ubuntu 24.04 under WSL2, using GCC 13.3.0, CMake 3.28.3,
 Ninja, and GoogleTest 1.14.0. The core library uses portable C++20; other compilers
 and operating systems have not yet been validated.
 
-The suite contains 84 GoogleTest cases: 59 focused runtime, queue, work-stealing,
-and priority tests, plus 25 stress cases. The basic example prints `Answer: 42`
+The suite contains 107 GoogleTest cases: 74 focused runtime, queue, work-stealing,
+priority, and dependency tests, plus 33 stress cases. The basic example prints `Answer: 42`
 and `Sum: 30`.
 
 The stress suite checks 100,000 tasks with four producers at each of 1, 2, 4, and
@@ -47,14 +47,27 @@ its successor; a pending Low task observes eight High and four Normal claims
 before the chain finishes. These tests check service opportunities rather than
 elapsed-time fairness, as described in [priorities.md](priorities.md).
 
+Dependency tests cover one-worker diamond graphs, fan-in and fan-out, ready
+promotion across priorities, discarded handles/futures, move-only callables,
+invalid and stale handles, duplicate prerequisites, and shutdown of a graph
+with waiting descendants. Gates force an exceptional prerequisite to finish
+after its child is registered. A one-worker sentinel establishes completed
+registration, and repeated registration/completion races check for missed
+releases. Another case verifies unrelated work can run while a child is waiting.
+
+Graph stress tests validate every result and execution count in 100-layer,
+10,000-node graphs with two prerequisites per non-root node. Concurrent
+registration also races shutdown, checking both accepted and rejected tasks.
+Both workloads run with 1, 2, 4, and 8 workers.
+
 ## Validated builds
 
 | Configuration | Result |
 | --- | --- |
-| Debug | 84/84 tests passed |
-| Release | 84/84 tests passed; all three example outputs verified |
-| AddressSanitizer + UndefinedBehaviorSanitizer | 84/84 tests passed; no sanitizer findings reported |
-| ThreadSanitizer | 84/84 tests passed with the WSL workaround below; no race findings reported |
+| Debug | 107/107 tests passed; one-worker diamond output verified |
+| Release | 107/107 tests passed; all four example outputs verified |
+| AddressSanitizer + UndefinedBehaviorSanitizer | Phase 4 validation pending |
+| ThreadSanitizer | 107/107 tests passed with the WSL workaround below; no race findings reported |
 
 The work-stealing example reports a checksum of `357389824`, `1025` submitted
 tasks, and one global claim. The remaining `1024` claims are split between local
@@ -62,13 +75,24 @@ execution and stealing according to the actual scheduling of that run; the split
 is not a fixed expected value or a performance benchmark.
 
 The gated priority example prints `High`, `Normal`, then `Low`.
+The dependency example prints `Root: 6`, `Left: 12`, `Right: 9`, and `Combined: 21`.
 
-The host disk filled during the sanitizer build. Generated build folders were
+Phase 3 completed all 84 tests in Debug, Release, ASan/UBSan, and TSan before
+dependency implementation began. The host disk filled during its sanitizer build. Generated build folders were
 removed and ASan/UBSan was rebuilt with one compiler job and
 `-DCMAKE_CXX_FLAGS_DEBUG=-g1`. Once the focused executable was linked, its
 disposable object files were removed to make room for the stress executable.
 Both executables then completed the full 84-test suite. Sanitizer instrumentation
 remained enabled for library and test code throughout.
+
+Phase 4 Debug and TSan builds use `-DCMAKE_CXX_FLAGS_DEBUG=-g0` and one compiler
+job to reduce disk use. Debug symbols are omitted; the runtime and tests remain
+unoptimized, and TSan instrumentation is enabled for its build.
+
+After the final fan-out storage-growth improvement, the full Release suite was
+repeated and all 23 dependency cases, including graph stress, were rerun under
+TSan. Both checks passed. The earlier Debug and complete TSan suite results
+preceded this storage-growth change.
 
 The sanitizer flags apply to library, example, and test translation units. The
 system GoogleTest package is prebuilt and is not rebuilt with instrumentation.

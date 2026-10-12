@@ -121,7 +121,17 @@ TaskHandle Scheduler::admit(Task task, Priority priority,
         for (const auto& parent : parents) {
             if (!parent->completed) {
                 // Reserve every edge before committing any registration.
-                parent->dependents.reserve(parent->dependents.size() + 1);
+                auto& dependents = parent->dependents;
+                if (dependents.size() == dependents.capacity()) {
+                    const auto limit = dependents.max_size();
+                    if (dependents.size() == limit) {
+                        throw std::length_error("too many task dependents");
+                    }
+                    const auto capacity = dependents.capacity();
+                    const auto grown = capacity == 0 ? std::size_t{1}
+                        : (capacity > limit / 2 ? limit : capacity * 2);
+                    dependents.reserve(grown);
+                }
                 ++node->remaining;
             }
         }

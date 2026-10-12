@@ -1,10 +1,12 @@
-# Architecture: Phase 3
+# Architecture: Phase 4
 
 ThreadForge combines a global injection queue with one mutex-protected queue per
 worker. Every queue has separate High, Normal, and Low lanes. External submissions
 enter the global queue, which is FIFO within each lane. Submissions from a
 worker of the same scheduler enter that worker's local queue. Submitting to a
 different scheduler counts as an external submission for the receiving scheduler.
+Accepted tasks whose prerequisites have not completed remain outside the ready
+queues. Completion releases them into separate intrusive priority ready lists.
 
 ## Components and ownership
 
@@ -15,12 +17,30 @@ so concurrent steals never inspect a vector being modified. Queue and waiting
 state outlive workers, and each worker's queue outlives its thread. Worker addresses
 remain stable because each worker is owned by a `std::unique_ptr`.
 
-`submit()` creates a typed `std::packaged_task<Result()>`, returns its future, and
-moves that task inside an erased `std::packaged_task<void()>`. A queued task has
-one owner and is invoked once. Move-only captures and arguments need no shared
-callable allocation or copyable wrapper. Both packaged tasks have future shared
-state, which incurs allocation overhead; this is a correctness baseline and can
-be measured before revisiting type erasure.
+`submit_task()` creates a typed `std::packaged_task<Result()>`, places it inside
+an erased `std::packaged_task<void()>`, and wraps invocation with dependency
+completion bookkeeping. It returns `TaskSubmission<Result>` with a result future
+and a copyable `TaskHandle`. `submit()` uses the same path and returns only the
+future. Move-only captures and arguments retain their single-invocation semantics.
+Packaged-task shared states and dependency nodes add allocation costs that can
+be measured before revisiting the representation.
+
+The scheduler owns an active-node map for every accepted task, including ordinary
+`submit()` calls. It retains blocked, queued, and running tasks independently of
+caller-held handles and futures. Handles retain their node and refer weakly to a
+scheduler identity; `valid()` is false for empty tokens or an expired owner and
+remains true after shutdown while the scheduler lives. Admission validates the
+owner identity and deduplicates prerequisite nodes.
+
+Registration and completion share the state mutex. Registration reserves edge
+storage before committing acceptance and counts only unfinished prerequisites.
+The typed future becomes ready before completion marks the node finished and
+decrements its children's remaining counts. Each child is released once when its
+count reaches zero, including after a parent throws. Completion removes the
+finished node from the active map while retaining a strong reference until after
+unlocking; user callable destruction therefore occurs outside scheduler locks.
+Dependencies only refer to already-accepted tasks, so creation-only edges cannot
+form a cycle. See [Dependency scheduling](dependencies.md) for public contracts.
 
 The worker removes a task while holding the queue lock, then executes it after
 releasing the lock. Arbitrary user code never executes under scheduler locks.
@@ -34,6 +54,8 @@ returned future's `get()`.
 | Global priority lanes and closed flag | Global queue mutex |
 | Each local queue's three priority lanes | Its own queue mutex |
 | Admission and wake generation | Scheduler state mutex |
+| Active nodes, completion flags, remaining counts, dependency registration | Scheduler state mutex |
+| Intrusive priority ready lists | Scheduler state mutex |
 | Sleeping workers | Scheduler condition variable with a generation predicate |
 | Worker joins | Scheduler shutdown mutex serializes external callers |
 | Results and task exceptions | Standard future shared state |
@@ -45,11 +67,19 @@ returned future's `get()`.
 ## Scheduling and waiting
 
 A worker chooses a priority class before selecting a source. For that class it
-tries its own lane, then the global FIFO lane, then every other worker's lane.
-Only after all those sources yield no task does it try the next class. The owner
+tries its own lane, the global injection lane, the intrusive ready list, then
+every other worker's lane. Only after all those sources yield no task does it try
+the next class. The owner
 pushes and pops the front (LIFO) within a lane, while a thief pops the back (oldest
 first). Victim selection rotates between class scans and successful steals. A
 stolen task executes directly rather than moving between ready queues.
+
+Ready tasks submitted without unfinished prerequisites normally retain local or
+global routing. The queue insertion helpers preserve the task if a deque cannot
+allocate; admission then links it to the intrusive ready list instead. Releasing
+an already-accepted dependent also uses this allocation-free path. The injection
+lane and intrusive lane are individually FIFO, with no FIFO order spanning them.
+Intrusive-list claims count as global work.
 
 Each worker has a service cursor over a fixed ring of eight High slots, four
 Normal slots, and one Low slot, initially pointing to High. A scan tries the
@@ -66,33 +96,40 @@ can change readiness during selection, so the policy does not impose a total
 priority ordering over concurrent execution.
 
 The worker snapshots a wake generation under the state mutex before scanning.
-Every accepted publication increments that generation under the same mutex and
-notifies one sleeper, including publications to a local queue. After an unsuccessful
-scan the worker takes the state mutex again. If the generation changed, it rescans.
-Otherwise it either exits after closure or waits for a generation change/closure.
+Every accepted submission increments that generation under the same mutex and
+notifies one sleeper, including publications to a local queue. Completion that
+releases dependents increments the generation and notifies all sleepers, as does
+the last completion after closure. After an unsuccessful scan the worker takes
+the state mutex again. If the generation changed, it rescans. Otherwise it exits
+only after closure with an empty active-node map, or waits for a generation
+change or that termination condition. Closed admission alone is not a satisfied
+wait predicate while accepted tasks remain, so draining does not spin.
 This protects the gap between the scan and entering a wait, without timed polling
 or an indefinite spin loop. Spurious notifications do not satisfy the predicate.
 
 Admission holds the state mutex while inserting into one queue; consumers release
 the queue mutex before taking the state mutex. The lock order has no reverse edge.
-The shared admission lock is a correctness tradeoff: local queues distribute queue
-access, but task publication still has a brief serialized section.
+The shared state lock is a correctness tradeoff: local queues distribute queue
+access, but admission, dependency registration, readiness promotion, and completion
+bookkeeping remain serialized.
 
 ## Shutdown protocol
 
 1. Reject shutdown from a worker of the same scheduler before taking the join lock.
 2. Serialize external shutdown callers using the shutdown mutex.
-3. Close admission under the state mutex, advance the generation, and notify all workers.
-4. Workers drain all queues and exit after a full unsuccessful scan with no generation change.
-5. Join every worker before returning from `shutdown()`.
+3. Close admission and the injection queue under the state mutex, advance the generation, and notify all workers.
+4. Drain ready tasks, release accepted children as prerequisites finish, and wait while active tasks remain.
+5. Workers exit after a full unsuccessful scan with no generation change and an empty active-node map.
+6. Join every worker before returning from `shutdown()`.
 
-Publication and closure share the state mutex. Publication before closure succeeds
-and its task must be drained; publication after closure is rejected, including
+New submission and closure share the state mutex. Admission before closure succeeds
+and its task must be drained; new submissions after closure are rejected, including
 nested worker submissions. Generation changes force a rescan if publication raced
-an earlier part of a scan. Once admission is closed, no new queue entries can appear
-and thieves only remove work, so an unsuccessful scan is sufficient for worker
-exit. No running-task counter is required: joining every worker also waits for tasks
-already removed from queues to finish.
+an earlier part of a scan. Closure rejects new task acceptance but completion can
+still publish already-accepted children to the intrusive ready lists. An empty
+scan alone is therefore insufficient for worker exit. The active-node map tracks
+unfinished accepted work; workers can exit once it is empty and admission is
+closed. Joining every worker also waits for invocation and cleanup to return.
 
 Self-shutdown is checked before taking the shutdown mutex because an external
 shutdown caller might already hold that mutex while joining the current worker.
@@ -105,29 +142,33 @@ graceful shutdown protocol as an explicit call.
 
 ## Boundaries and tradeoffs
 
-The per-lane global FIFO and local LIFO policies describe selection order;
+The per-source, per-lane FIFO and local LIFO policies describe selection order;
 concurrent execution and completion order are unspecified. Weighted service gives
 priority classes opportunities under sustained load, without an elapsed-time
 bound or fairness guarantee for individual tasks. Local LIFO can postpone old
 local tasks, and local-source preference can delay global or victim tasks of the
 same class indefinitely. Priorities are explicit, default to Normal, and are not
 inherited by nested submissions. Unbounded admission can exhaust memory, and the
-shared publication gate and queue mutexes can become contention points. No lock-free
+shared state lock and queue mutexes can become contention points. Continuous
+injection work can postpone intrusive-ready tasks of the same class. No lock-free
 algorithm or performance advantage is claimed without measurement.
 
 `metrics()` aggregates submitted tasks, local/global claims, successful steals,
 failed victim-priority-lane probes, and wait episodes. The per-worker counters use
-relaxed atomics and do not establish synchronization. A live snapshot can mix different instants;
-after shutdown the counters are stable and every accepted task has exactly one
+relaxed atomics and do not establish synchronization. A live snapshot can mix
+different instants; after shutdown the counters are stable and every accepted task has exactly one
 local/global/stolen classification. Successful steals are charged to the thief.
+Submitted totals include accepted blocked children; global claims include both
+injection and intrusive ready-list tasks.
 An empty victim can produce three failed probes in a full scan, one per priority
 lane; no self-probe is counted. Wait episodes count entries into a
 condition-variable wait, not elapsed idle time.
 
 Tasks must terminate for graceful shutdown to finish. The runtime does not forcibly
 interrupt user code. Blocking all workers on futures for work submitted to their
-own scheduler can deadlock. A later DAG scheduler will release dependency-ready
-tasks without occupying a waiting worker.
+own scheduler can deadlock. Declared prerequisites let the dependency scheduler
+release ready tasks without occupying a waiting worker, but arbitrary future
+waits do not gain cooperative execution.
 
 The scheduler must outlive its tasks and any concurrent API users. Destruction
 from one of its own tasks is unsupported. Cycles involving tasks, external locks,
@@ -135,9 +176,9 @@ or shutdown of multiple schedulers remain the application's responsibility.
 
 ## Repository evolution
 
-Phase 3 adds `priority.hpp`, priority lanes in both queue types, the weighted
-worker service cursor, and dedicated `priority_test.cpp` coverage. Phase 2 work
-stealing and metrics remain in place. The global queue retains its blocking API
-for direct consumers and tests; runtime workers use its priority-specific
-nonblocking `try_pop()` and the scheduler-wide waiting protocol. No dependency
-scheduler is implemented yet.
+Phase 4 adds `task_handle.hpp`, completion-based dependency registration, active
+task ownership, intrusive ready lists, and dedicated `dependency_test.cpp`
+coverage. Priority lanes, weighted service, work stealing, and source metrics
+remain in place. The global queue retains its blocking API for direct consumers
+and tests; runtime workers use priority-specific nonblocking probes and the
+scheduler-wide waiting protocol.

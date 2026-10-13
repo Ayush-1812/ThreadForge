@@ -1,8 +1,9 @@
 # ThreadForge validation
 
-Validation is performed on Ubuntu 24.04 under WSL2, using GCC 13.3.0, CMake 3.28.3,
-Ninja, and GoogleTest 1.14.0. The core library uses portable C++20; other compilers
-and operating systems have not yet been validated.
+Local validation uses Ubuntu 24.04 under WSL2 with GCC 13.3.0, CMake 3.28.3,
+Ninja, and GoogleTest 1.14.0. The Phase 6 hosted matrix also validates GCC 13 and
+Clang 18 on Ubuntu 24.04, including sanitizer configurations described below.
+Native Windows, macOS, and alternative standard libraries remain unvalidated.
 
 The Phase 4 suite contained 107 GoogleTest cases: 74 focused runtime, queue, work-stealing,
 priority, and dependency tests, plus 33 stress cases. The basic example prints `Answer: 42`
